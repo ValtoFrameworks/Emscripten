@@ -5,9 +5,12 @@ WebIDL binder
 http://kripken.github.io/emscripten-site/docs/porting/connecting_cpp_and_javascript/WebIDL-Binder.html
 '''
 
+from __future__ import print_function
 import os, sys
 
-import shared
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tools import shared
 
 sys.path.append(shared.path_from_root('third_party'))
 sys.path.append(shared.path_from_root('third_party', 'ply'))
@@ -23,11 +26,11 @@ CHECKS = os.environ.get('IDL_CHECKS') or 'DEFAULT'
 # DEBUG=1 will print debug info in render_function
 DEBUG = os.environ.get('IDL_VERBOSE') is '1'
 
-if DEBUG: print "Debug print ON, CHECKS=%s" % CHECKS
+if DEBUG: print("Debug print ON, CHECKS=%s" % CHECKS)
 
-class Dummy:
+class Dummy(object):
   def __init__(self, init):
-    for k, v in init.iteritems():
+    for k, v in init.items():
       self.__dict__[k] = v
 
   def getExtendedAttribute(self, name):
@@ -148,78 +151,106 @@ var ensureCache = {
   needed: 0, // the total size we need next time
 
   prepare: function() {
-    if (this.needed) {
+    if (ensureCache.needed) {
       // clear the temps
-      for (var i = 0; i < this.temps.length; i++) {
-        Module['_free'](this.temps[i]);
+      for (var i = 0; i < ensureCache.temps.length; i++) {
+        Module['_free'](ensureCache.temps[i]);
       }
-      this.temps.length = 0;
+      ensureCache.temps.length = 0;
       // prepare to allocate a bigger buffer
-      Module['_free'](this.buffer);
-      this.buffer = 0;
-      this.size += this.needed;
+      Module['_free'](ensureCache.buffer);
+      ensureCache.buffer = 0;
+      ensureCache.size += ensureCache.needed;
       // clean up
-      this.needed = 0;
+      ensureCache.needed = 0;
     }
-    if (!this.buffer) { // happens first time, or when we need to grow
-      this.size += 128; // heuristic, avoid many small grow events
-      this.buffer = Module['_malloc'](this.size);
-      assert(this.buffer);
+    if (!ensureCache.buffer) { // happens first time, or when we need to grow
+      ensureCache.size += 128; // heuristic, avoid many small grow events
+      ensureCache.buffer = Module['_malloc'](ensureCache.size);
+      assert(ensureCache.buffer);
     }
-    this.pos = 0;
+    ensureCache.pos = 0;
   },
   alloc: function(array, view) {
-    assert(this.buffer);
+    assert(ensureCache.buffer);
     var bytes = view.BYTES_PER_ELEMENT;
     var len = array.length * bytes;
     len = (len + 7) & -8; // keep things aligned to 8 byte boundaries
     var ret;
-    if (this.pos + len >= this.size) {
-      // we failed to allocate in the buffer, this time around :(
+    if (ensureCache.pos + len >= ensureCache.size) {
+      // we failed to allocate in the buffer, ensureCache time around :(
       assert(len > 0); // null terminator, at least
-      this.needed += len;
+      ensureCache.needed += len;
       ret = Module['_malloc'](len);
-      this.temps.push(ret);
+      ensureCache.temps.push(ret);
     } else {
       // we can allocate in the buffer
-      ret = this.buffer + this.pos;
-      this.pos += len;
-    }
-    var retShifted = ret;
-    switch (bytes) {
-      case 2: retShifted >>= 1; break;
-      case 4: retShifted >>= 2; break;
-      case 8: retShifted >>= 3; break;
-    }
-    for (var i = 0; i < array.length; i++) {
-      view[retShifted + i] = array[i];
+      ret = ensureCache.buffer + ensureCache.pos;
+      ensureCache.pos += len;
     }
     return ret;
+  },  
+  copy: function(array, view, offset) {
+    var offsetShifted = offset;
+    var bytes = view.BYTES_PER_ELEMENT;
+    switch (bytes) {
+      case 2: offsetShifted >>= 1; break;
+      case 4: offsetShifted >>= 2; break;
+      case 8: offsetShifted >>= 3; break;
+    }
+    for (var i = 0; i < array.length; i++) {
+      view[offsetShifted + i] = array[i];
+    }   
   },
 };
 
 function ensureString(value) {
-  if (typeof value === 'string') return ensureCache.alloc(intArrayFromString(value), HEAP8);
+  if (typeof value === 'string') {
+    var intArray = intArrayFromString(value);
+    var offset = ensureCache.alloc(intArray, HEAP8);
+    ensureCache.copy(intArray, HEAP8, offset);
+    return offset;
+  }
   return value;
 }
 function ensureInt8(value) {
-  if (typeof value === 'object') return ensureCache.alloc(value, HEAP8);
+  if (typeof value === 'object') {
+    var offset = ensureCache.alloc(value, HEAP8);
+    ensureCache.copy(value, HEAP8, offset);
+    return offset;
+  }
   return value;
 }
 function ensureInt16(value) {
-  if (typeof value === 'object') return ensureCache.alloc(value, HEAP16);
+  if (typeof value === 'object') {
+    var offset = ensureCache.alloc(value, HEAP16);
+    ensureCache.copy(value, HEAP16, offset);
+    return offset;
+  }
   return value;
 }
 function ensureInt32(value) {
-  if (typeof value === 'object') return ensureCache.alloc(value, HEAP32);
+  if (typeof value === 'object') {
+    var offset = ensureCache.alloc(value, HEAP32);
+    ensureCache.copy(value, HEAP32, offset);
+    return offset;
+  }
   return value;
 }
 function ensureFloat32(value) {
-  if (typeof value === 'object') return ensureCache.alloc(value, HEAPF32);
+  if (typeof value === 'object') {
+    var offset = ensureCache.alloc(value, HEAPF32);
+    ensureCache.copy(value, HEAPF32, offset);
+    return offset;
+  }
   return value;
 }
 function ensureFloat64(value) {
-  if (typeof value === 'object') return ensureCache.alloc(value, HEAPF64);
+  if (typeof value === 'object') {
+    var offset = ensureCache.alloc(value, HEAPF64);
+    ensureCache.copy(value, HEAPF64, offset);
+    return offset;
+  }
   return value;
 }
 
@@ -229,7 +260,7 @@ mid_c += ['''
 // Not using size_t for array indices as the values used by the javascript code are signed.
 void array_bounds_check(const int array_size, const int array_idx) {
   if (array_idx < 0 || array_idx >= array_size) {
-    EM_ASM_INT({
+    EM_ASM({
       throw 'Array index ' + $0 + ' out of bounds: [0,' + $1 + ')';
     }, array_idx, array_size);
   }
@@ -312,13 +343,13 @@ def render_function(class_name, func_name, sigs, return_type, non_pointer, copy,
   all_args = sigs.get(max_args)
 
   if DEBUG:
-    print 'renderfunc', class_name, func_name, sigs.keys(), return_type, constructor
+    print('renderfunc', class_name, func_name, list(sigs.keys()), return_type, constructor)
     for i in range(max_args):
       a = all_args[i]
       if isinstance(a, WebIDL.IDLArgument):
-        print ("  arg%d" % i), a.identifier, a.type, a.optional
+        print(("  arg%d" % i), a.identifier, a.type, a.optional)
       else:
-        print "  arg%d" % i
+        print("  arg%d" % i)
 
   # JS
 
@@ -443,11 +474,11 @@ def render_function(class_name, func_name, sigs, return_type, non_pointer, copy,
   for i in range(min_args, max_args+1):
     raw = sigs.get(i)
     if raw is None: continue
-    sig = map(full_typename, raw)
+    sig = list(map(full_typename, raw))
     if array_attribute:
-      sig = map(lambda x: x.replace('[]', ''), sig) # for arrays, ignore that this is an array - our get/set methods operate on the elements
+      sig = [x.replace('[]', '') for x in sig] # for arrays, ignore that this is an array - our get/set methods operate on the elements
 
-    c_arg_types = map(type_to_c, sig)
+    c_arg_types = list(map(type_to_c, sig))
 
     normal_args = ', '.join(['%s arg%d' % (c_arg_types[j], j) for j in range(i)])
     if constructor:
@@ -497,7 +528,7 @@ def render_function(class_name, func_name, sigs, return_type, non_pointer, copy,
 
     if not constructor:
       if i == max_args:
-        dec_args = ', '.join(map(lambda j: type_to_cdec(raw[j]) + ' arg' + str(j), range(i)))
+        dec_args = ', '.join([type_to_cdec(raw[j]) + ' arg' + str(j) for j in range(i)])
         js_call_args = ', '.join(['%sarg%d' % (('(int)' if sig[j] in interfaces else '') + ('&' if raw[j].getExtendedAttribute('Ref') or raw[j].getExtendedAttribute('Value') else ''), j) for j in range(i)])
 
         js_impl_methods += [r'''  %s %s(%s) {
@@ -517,7 +548,7 @@ def render_function(class_name, func_name, sigs, return_type, non_pointer, copy,
           (', ' if js_call_args else '') + js_call_args)]
 
 
-for name, interface in interfaces.iteritems():
+for name, interface in interfaces.items():
   js_impl = interface.getExtendedAttribute('JSImplementation')
   if not js_impl: continue
   implements[name] = [js_impl[0]]
@@ -531,7 +562,7 @@ for name, interface in interfaces.iteritems():
 # that invariant. Further, the height of a node never decreases. Therefore, when the loop
 # finishes, all ancestors of a given node should have a larger height number than that node.
 nodeHeight = {}
-for child, parent in implements.iteritems():
+for child, parent in implements.items():
   parent = parent[0]
   while parent:
     nodeHeight[parent] = max(nodeHeight.get(parent, 0), nodeHeight.get(child, 0) + 1)
@@ -542,7 +573,7 @@ for child, parent in implements.iteritems():
     else:
       parent = None
 
-names = interfaces.keys()
+names = list(interfaces.keys())
 names.sort(lambda x, y: nodeHeight.get(y, 0) - nodeHeight.get(x, 0))
 
 for name in names:
@@ -683,7 +714,7 @@ public:
 
 deferred_js = []
 
-for name, enum in enums.iteritems():
+for name, enum in enums.items():
   mid_c += ['\n// ' + name + '\n']
   deferred_js += ['\n', '// ' + name + '\n']
   for value in enum.values():

@@ -1,3 +1,4 @@
+from __future__ import print_function
 import math, os, shutil, subprocess
 import runner
 from runner import RunnerCore, path_from_root
@@ -18,7 +19,7 @@ CORE_BENCHMARKS = True # core benchmarks vs full regression suite
 
 IGNORE_COMPILATION = 0
 
-class Benchmarker:
+class Benchmarker(object):
   def __init__(self, name):
     self.name = name
 
@@ -34,27 +35,31 @@ class Benchmarker:
         else:
           curr = time.time() - start
       else:
-        curr = output_parser(output)
+        try:
+          curr = output_parser(output)
+        except Exception as e:
+          logging.error(str(e))
+          logging.error('Parsing benchmark results failed, output was: ' + output)
       self.times.append(curr)
 
   def display(self, baseline=None):
     if baseline == self: baseline = None
     mean = sum(self.times)/len(self.times)
-    squared_times = map(lambda x: x*x, self.times)
+    squared_times = [x*x for x in self.times]
     mean_of_squared = sum(squared_times)/len(self.times)
     std = math.sqrt(mean_of_squared - mean*mean)
     sorted_times = self.times[:]
     sorted_times.sort()
     median = sum(sorted_times[len(sorted_times)/2 - 1:len(sorted_times)/2 + 1])/2
 
-    print '   %10s: mean: %4.3f (+-%4.3f) secs  median: %4.3f  range: %4.3f-%4.3f  (noise: %4.3f%%)  (%d runs)' % (self.name, mean, std, median, min(self.times), max(self.times), 100*std/mean, self.reps),
+    print('   %10s: mean: %4.3f (+-%4.3f) secs  median: %4.3f  range: %4.3f-%4.3f  (noise: %4.3f%%)  (%d runs)' % (self.name, mean, std, median, min(self.times), max(self.times), 100*std/mean, self.reps), end=' ')
 
     if baseline:
       mean_baseline = sum(baseline.times)/len(baseline.times)
       final = mean / mean_baseline
-      print '  Relative: %.2f X slower' % final
+      print('  Relative: %.2f X slower' % final)
     else:
-      print
+      print()
 
 class NativeBenchmarker(Benchmarker):
   def __init__(self, name, cc, cxx, args=['-O2']):
@@ -72,8 +77,8 @@ class NativeBenchmarker(Benchmarker):
       process = Popen(cmd, stdout=PIPE, stderr=parent.stderr_redirect, env=get_clang_native_env())
       output = process.communicate()
       if process.returncode is not 0:
-        print >> sys.stderr, "Building native executable with command failed", ' '.join(cmd)
-        print "Output: " + str(output[0]) + '\n' + str(output[1])
+        print("Building native executable with command failed", ' '.join(cmd), file=sys.stderr)
+        print("Output: " + str(output[0]) + '\n' + str(output[1]))
     else:
       shutil.copyfile(native_exec, filename + '.native')
       shutil.copymode(native_exec, filename + '.native')
@@ -92,7 +97,7 @@ class JSBenchmarker(Benchmarker):
     self.engine = engine
     self.extra_args = extra_args
     self.env = os.environ.copy()
-    for k, v in env.iteritems():
+    for k, v in env.items():
       self.env[k] = v
 
   def build(self, parent, filename, args, shared_args, emcc_args, native_args, native_exec, lib_builder, has_output_parser):
@@ -117,7 +122,7 @@ process(sys.argv[1])
     output = Popen([PYTHON, EMCC, filename, #'-O3',
                     '-O3', '-s', 'DOUBLE_MODE=0', '-s', 'PRECISE_I64_MATH=0',
                     '--memory-init-file', '0', '--js-transform', 'python hardcode.py',
-                    '-s', 'TOTAL_MEMORY=128*1024*1024',
+                    '-s', 'TOTAL_MEMORY=256*1024*1024',
                     '-s', 'NO_EXIT_RUNTIME=1',
                     '-s', 'BENCHMARK=%d' % (1 if IGNORE_COMPILATION and not has_output_parser else 0),
                     #'--profiling',
@@ -132,17 +137,21 @@ process(sys.argv[1])
 # Benchmarkers
 try:
   benchmarkers_error = ''
-  benchmarkers = [NativeBenchmarker('clang', CLANG_CC, CLANG)]
-  if SPIDERMONKEY_ENGINE and SPIDERMONKEY_ENGINE[0]:
+  benchmarkers = [
+    NativeBenchmarker('clang', CLANG_CC, CLANG),
+    NativeBenchmarker('gcc',   'gcc',    'g++')
+  ]
+  if SPIDERMONKEY_ENGINE and Building.which(SPIDERMONKEY_ENGINE[0]):
     benchmarkers += [
       JSBenchmarker('sm-asmjs', SPIDERMONKEY_ENGINE, ['-s', 'PRECISE_F32=2']),
-      JSBenchmarker('sm-wasm',  SPIDERMONKEY_ENGINE, ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1'])
+      JSBenchmarker('sm-simd',  SPIDERMONKEY_ENGINE, ['-s', 'SIMD=1']),
+      JSBenchmarker('sm-wasm',  SPIDERMONKEY_ENGINE, ['-s', 'WASM=1']),
     ]
-  if V8_ENGINE and V8_ENGINE[0]:
+  if V8_ENGINE and Building.which(V8_ENGINE[0]):
     benchmarkers += [
-      JSBenchmarker('v8-wasm',  V8_ENGINE,           ['-s', 'BINARYEN=1', '-s', 'BINARYEN_METHOD="native-wasm"', '-s', 'BINARYEN_IMPRECISE=1'])
+      JSBenchmarker('v8-wasm',  V8_ENGINE,           ['-s', 'WASM=1']),
     ]
-except Exception, e:
+except Exception as e:
   benchmarkers_error = str(e)
   benchmarkers = []
 
@@ -161,14 +170,13 @@ class benchmark(RunnerCore):
     try:
       d = os.getcwd()
       os.chdir(os.path.expanduser('~/Dev/mozilla-central'))
-      fingerprint.append('sm: ' + filter(lambda line: 'changeset' in line,
-                                         Popen(['hg', 'tip'], stdout=PIPE).communicate()[0].split('\n'))[0])
+      fingerprint.append('sm: ' + [line for line in Popen(['hg', 'tip'], stdout=PIPE).communicate()[0].split('\n') if 'changeset' in line][0])
     except:
       pass
     finally:
       os.chdir(d)
     fingerprint.append('llvm: ' + LLVM_ROOT)
-    print 'Running Emscripten benchmarks... [ %s ]' % ' | '.join(fingerprint)
+    print('Running Emscripten benchmarks... [ %s ]' % ' | '.join(fingerprint))
 
     assert(os.path.exists(CLOSURE_COMPILER))
 
@@ -193,7 +201,7 @@ class benchmark(RunnerCore):
     f.write(src)
     f.close()
 
-    print
+    print()
     for b in benchmarkers:
       b.build(self, filename, args, shared_args, emcc_args, native_args, native_exec, lib_builder, has_output_parser=output_parser is not None)
       b.bench(args, output_parser, reps)
@@ -581,6 +589,79 @@ class benchmark(RunnerCore):
     def output_parser(output):
       return 100.0/float(re.search('Unrolled Single  Precision +([\d\.]+) Mflops', output).group(1))
     self.do_benchmark('linpack_float', open(path_from_root('tests', 'linpack.c')).read(), '''Unrolled Single  Precision''', force_c=True, output_parser=output_parser, shared_args=['-DSP'])
+
+  # Benchmarks the synthetic performance of calling native functions.
+  def test_native_functions(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('native_functions', open(path_from_root('tests', 'benchmark_ffis.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  # Benchmarks the synthetic performance of calling function pointers.
+  def test_native_function_pointers(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('native_functions', open(path_from_root('tests', 'benchmark_ffis.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DBENCHMARK_FUNCTION_POINTER=1', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  # Benchmarks the synthetic performance of calling "foreign" JavaScript functions.
+  def test_foreign_functions(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('foreign_functions', open(path_from_root('tests', 'benchmark_ffis.cpp')).read(), '''Total time:''', output_parser=output_parser, emcc_args=['--js-library', path_from_root('tests/benchmark_ffis.js')], shared_args=['-DBENCHMARK_FOREIGN_FUNCTION=1', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memcpy_128b(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memcpy_128b', open(path_from_root('tests', 'benchmark_memcpy.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMAX_COPY=128', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memcpy_4k(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memcpy_4k', open(path_from_root('tests', 'benchmark_memcpy.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=128', '-DMAX_COPY=4096', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memcpy_16k(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memcpy_16k', open(path_from_root('tests', 'benchmark_memcpy.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=4096', '-DMAX_COPY=16384', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memcpy_1mb(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memcpy_1mb', open(path_from_root('tests', 'benchmark_memcpy.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=16384', '-DMAX_COPY=1048576', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memcpy_16mb(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memcpy_16mb', open(path_from_root('tests', 'benchmark_memcpy.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=1048576', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memset_128b(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memset_128b', open(path_from_root('tests', 'benchmark_memset.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMAX_COPY=128', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memset_4k(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memset_4k', open(path_from_root('tests', 'benchmark_memset.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=128', '-DMAX_COPY=4096', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memset_16k(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memset_16k', open(path_from_root('tests', 'benchmark_memset.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=4096', '-DMAX_COPY=16384', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memset_1mb(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memset_1mb', open(path_from_root('tests', 'benchmark_memset.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=16384', '-DMAX_COPY=1048576', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_memset_16mb(self):
+    def output_parser(output):
+      return float(re.search('Total time: ([\d\.]+)', output).group(1))
+    self.do_benchmark('memset_16mb', open(path_from_root('tests', 'benchmark_memset.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-DMIN_COPY=1048576', '-DBUILD_FOR_SHELL', '-I'+path_from_root('tests')])
+
+  def test_matrix_multiply(self):
+    def output_parser(output):
+      return float(re.search('Total elapsed: ([\d\.]+)', output).group(1))
+    self.do_benchmark('matrix_multiply', open(path_from_root('tests', 'matrix_multiply.cpp')).read(), '''Total time:''', output_parser=output_parser, shared_args=['-I'+path_from_root('tests')])
 
   def test_zzz_java_nbody(self): # tests xmlvm compiled java, including bitcasts of doubles, i64 math, etc.
     if CORE_BENCHMARKS: return

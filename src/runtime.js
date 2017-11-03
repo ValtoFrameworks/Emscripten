@@ -132,6 +132,7 @@ var Runtime = {
   // word is placed in tempRet0. This provides an accessor for that value.
   setTempRet0: function(value) {
     tempRet0 = value;
+    return value;
   },
   getTempRet0: function() {
     return tempRet0;
@@ -319,12 +320,20 @@ var Runtime = {
   loadedDynamicLibraries: [],
 
   loadDynamicLibrary: function(lib) {
+    var libModule;
 #if BINARYEN
-    var bin = Module['readBinary'](lib);
-    var libModule = Runtime.loadWebAssemblyModule(bin);
+    var bin;
+    if (lib.buffer) {
+      // we were provided the binary, in a typed array
+      bin = lib;
+    } else {
+      // load the binary synchronously
+      bin = Module['readBinary'](lib);
+    }
+    libModule = Runtime.loadWebAssemblyModule(bin);
 #else
     var src = Module['read'](lib);
-    var libModule = eval(src)(
+    libModule = eval(src)(
       Runtime.alignFunctionTables(),
       Module
     );
@@ -461,6 +470,7 @@ var Runtime = {
   funcWrappers: {},
 
   getFuncWrapper: function(func, sig) {
+    if (!func) return; // on null pointer, return undefined
     assert(sig);
     if (!Runtime.funcWrappers[sig]) {
       Runtime.funcWrappers[sig] = {};
@@ -565,6 +575,7 @@ if (MAIN_MODULE || SIDE_MODULE) {
   };
   Runtime.setTempRet0 = function(x) {
     Runtime.tempRet0 = x;
+    return x;
   };
 }
 
