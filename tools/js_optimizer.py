@@ -246,11 +246,11 @@ class Minifier(object):
       f.write('// EXTRA_INFO:' + json.dumps(self.serialize()))
       f.close()
 
-      output = subprocess.Popen(self.js_engine +
+      output = shared.run_process(self.js_engine +
           [JS_OPTIMIZER, temp_file, 'minifyGlobals', 'noPrintMetadata'] +
           (['minifyWhitespace'] if minify_whitespace else []) +
           (['--debug'] if source_map else []),
-          stdout=subprocess.PIPE).communicate()[0]
+          stdout=subprocess.PIPE).stdout
 
     assert len(output) > 0 and not output.startswith('Assertion failed'), 'Error in js optimizer: ' + output
     #print >> sys.stderr, "minified SHELL 3333333333333333", output, "\n44444444444444444444"
@@ -290,14 +290,12 @@ def run_on_chunk(command):
       print('running js optimizer command', ' '.join([c if c != filename else saved for c in command]), file=sys.stderr)
       shutil.copyfile(filename, os.path.join(shared.get_emscripten_temp_dir(), saved))
     if shared.EM_BUILD_VERBOSE_LEVEL >= 3: print('run_on_chunk: ' + str(command), file=sys.stderr)
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE)
-    output = proc.communicate()[0]
+    proc = shared.run_process(command, stdout=subprocess.PIPE)
+    output = proc.stdout
     assert proc.returncode == 0, 'Error in optimizer (return code ' + str(proc.returncode) + '): ' + output
     assert len(output) > 0 and not output.startswith('Assertion failed'), 'Error in optimizer: ' + output
     filename = temp_files.get(os.path.basename(filename) + '.jo.js').name
-    # Important to write out in binary mode, because the data we are writing contains Windows line endings '\r\n' because it was PIPED from console.
-    # Otherwise writing \r\n to ascii mode file will result in Windows amplifying \n to \r\n, generating bad \r\r\n line endings.
-    f = open(filename, 'wb')
+    f = open(filename, 'w')
     f.write(output)
     f.close()
     if DEBUG and not shared.WINDOWS: print('.', file=sys.stderr) # Skip debug progress indicator on Windows, since it doesn't buffer well with multiple threads printing to console.
@@ -387,6 +385,9 @@ EMSCRIPTEN_FUNCS();
         return True
       passes = list(filter(check_symbol_mapping, passes))
       asm_shell_pre, asm_shell_post = minifier.minify_shell(asm_shell, 'minifyWhitespace' in passes, source_map).split('EMSCRIPTEN_FUNCS();');
+      # Restore a comment for Closure Compiler
+      asm_open_bracket = asm_shell_pre.find('(')
+      asm_shell_pre = asm_shell_pre[:asm_open_bracket+1] + '/** @suppress {uselessCode} */' + asm_shell_pre[asm_open_bracket+1:]
       asm_shell_post = asm_shell_post.replace('});', '})');
       pre += asm_shell_pre + '\n' + start_funcs_marker
       post = end_funcs_marker + asm_shell_post + post
@@ -425,7 +426,7 @@ EMSCRIPTEN_FUNCS();
       chunks = [f[1] for f in funcs]
 
     chunks = [chunk for chunk in chunks if len(chunk) > 0]
-    if DEBUG and len(chunks) > 0: print('chunkification: num funcs:', len(funcs), 'actual num chunks:', len(chunks), 'chunk size range:', max(list(map(len, chunks))), '-', min(list(map(len, chunks))), file=sys.stderr)
+    if DEBUG and len(chunks) > 0: print('chunkification: num funcs:', len(funcs), 'actual num chunks:', len(chunks), 'chunk size range:', max(map(len, chunks)), '-', min(map(len, chunks)), file=sys.stderr)
     funcs = None
 
     if len(chunks) > 0:
@@ -515,7 +516,9 @@ EMSCRIPTEN_FUNCS();
       after = 'wakaUnknownAfter'
       start = coutput.find(after)
       end = coutput.find(')', start)
-      pre = coutput[:start] + '(function(global,env,buffer) {\n' + pre_2[pre_2.find('{')+1:]
+      # First brace is from Closure Compiler comment, thus we need a second one
+      pre_2_second_brace = pre_2.find('{', pre_2.find('{')+1)
+      pre = coutput[:start] + '(/** @suppress {uselessCode} */ function(global,env,buffer) {\n' + pre_2[pre_2_second_brace+1:]
       post = post_1 + end_asm + coutput[end+1:]
 
   with ToolchainProfiler.profile_block('write_pre'):
@@ -532,14 +535,8 @@ EMSCRIPTEN_FUNCS();
         funcses.append(split_funcs(open(out_file).read(), False))
       funcs = [item for sublist in funcses for item in sublist]
       funcses = None
-      def sorter(x, y):
-        diff = len(y[1]) - len(x[1])
-        if diff != 0: return diff
-        if x[0] < y[0]: return 1
-        elif x[0] > y[0]: return -1
-        return 0
       if not os.environ.get('EMCC_NO_OPT_SORT'):
-        funcs.sort(sorter)
+        funcs.sort(key=lambda x: (len(x[1]), x[0]), reverse=True)
 
       if 'last' in passes and len(funcs) > 0:
         count = funcs[0][1].count('\n')

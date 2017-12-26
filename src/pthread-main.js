@@ -30,6 +30,8 @@ var Module = {};
 // When error objects propagate from Web Worker to main thread, they lose helpful call stack and thread ID information, so print out errors early here,
 // before that happens.
 this.addEventListener('error', function(e) {
+  if (e.message.indexOf('SimulateInfiniteLoop') != -1) return e.preventDefault();
+
   var errorSource = ' in ' + e.filename + ':' + e.lineno + ':' + e.colno;
   console.error('Pthread ' + selfThreadId + ' uncaught exception' + (e.filename || e.lineno || e.colno ? errorSource : '') + ': ' + e.message + '. Error object:');
   console.error(e.error);
@@ -52,6 +54,18 @@ Module['print'] = threadPrint;
 Module['printErr'] = threadPrintErr;
 this.alert = threadAlert;
 
+// #if WASM
+Module['instantiateWasm'] = function(info, receiveInstance) {
+  // Instantiate from the module posted from the main thread.
+  // We can just use sync instantiation in the worker.
+  instance = new WebAssembly.Instance(Module['wasmModule'], info);
+  // We don't need the module anymore; new threads will be spawned from the main thread.
+  delete Module['wasmModule'];
+  receiveInstance(instance);
+  return instance.exports;
+}
+//#endif
+
 this.onmessage = function(e) {
   try {
     if (e.data.cmd === 'load') { // Preload command that is called once per worker to parse and load the Emscripten code.
@@ -59,11 +73,23 @@ this.onmessage = function(e) {
       tempDoublePtr = e.data.tempDoublePtr;
 
       // Initialize the global "process"-wide fields:
-      buffer = e.data.buffer;
       Module['TOTAL_MEMORY'] = TOTAL_MEMORY = e.data.TOTAL_MEMORY;
       STATICTOP = e.data.STATICTOP;
       DYNAMIC_BASE = e.data.DYNAMIC_BASE;
       DYNAMICTOP_PTR = e.data.DYNAMICTOP_PTR;
+
+
+//#if WASM
+      if (e.data.wasmModule) {
+        // Module and memory were sent from main thread
+        Module['wasmModule'] = e.data.wasmModule;
+        Module['wasmMemory'] = e.data.wasmMemory;
+        buffer = Module['wasmMemory'].buffer;
+      } else {
+//#else
+        buffer = e.data.buffer;
+      }
+//#endif
 
       PthreadWorkerInit = e.data.PthreadWorkerInit;
       if (typeof e.data.urlOrBlob === 'string') {
@@ -93,7 +119,7 @@ this.onmessage = function(e) {
       STACK_MAX = STACK_BASE + e.data.stackSize;
       assert(STACK_BASE != 0);
       assert(STACK_MAX > STACK_BASE);
-      Runtime.establishStackSpace(e.data.stackBase, e.data.stackBase + e.data.stackSize);
+      establishStackSpace(e.data.stackBase, e.data.stackBase + e.data.stackSize);
       var result = 0;
 //#if STACK_OVERFLOW_CHECK
       if (typeof writeStackCookie === 'function') writeStackCookie();
@@ -119,21 +145,24 @@ this.onmessage = function(e) {
         if (e === 'Canceled!') {
           PThread.threadCancel();
           return;
+        } else if (e === 'SimulateInfiniteLoop') {
+          return;
         } else {
-          Atomics.store(HEAPU32, (threadInfoStruct + 4 /*{{{ C_STRUCTS.pthread.threadExitCode }}}*/ ) >> 2, -2 /*A custom entry specific to Emscripten denoting that the thread crashed.*/);
+          Atomics.store(HEAPU32, (threadInfoStruct + 4 /*{{{ C_STRUCTS.pthread.threadExitCode }}}*/ ) >> 2, (e instanceof ExitStatus) ? e.status : -2 /*A custom entry specific to Emscripten denoting that the thread crashed.*/);
           Atomics.store(HEAPU32, (threadInfoStruct + 0 /*{{{ C_STRUCTS.pthread.threadStatus }}}*/ ) >> 2, 1); // Mark the thread as no longer running.
-          _emscripten_futex_wake(threadInfoStruct + 0 /*{{{ C_STRUCTS.pthread.threadStatus }}}*/, 0x7FFFFFFF/*INT_MAX*/); // wake all threads
-          throw e;
+          _emscripten_futex_wake(threadInfoStruct + 0 /*{{{ C_STRUCTS.pthread.threadStatus }}}*/, 0x7FFFFFFF/*INT_MAX*/); // Wake all threads waiting on this thread to finish.
+          if (!(e instanceof ExitStatus)) throw e;
         }
       }
       // The thread might have finished without calling pthread_exit(). If so, then perform the exit operation ourselves.
       // (This is a no-op if explicit pthread_exit() had been called prior.)
-      if (!Module['noExitRuntime']) PThread.threadExit(result);
-      else console.log('pthread noExitRuntime: not quitting.');
+      PThread.threadExit(result);
     } else if (e.data.cmd === 'cancel') { // Main thread is asking for a pthread_cancel() on this thread.
       if (threadInfoStruct && PThread.thisThreadCancelState == 0/*PTHREAD_CANCEL_ENABLE*/) {
         PThread.threadCancel();
       }
+    } else if (e.data.target === 'setimmediate') {
+      // no-op
     } else {
       Module['printErr']('pthread-main.js received unknown command ' + e.data.cmd);
       console.error(e.data);

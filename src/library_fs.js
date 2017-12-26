@@ -14,7 +14,7 @@ mergeInto(LibraryManager.library, {
                 '__ATINIT__.unshift(function() { if (!Module["noFSInit"] && !FS.init.initialized) FS.init() });' +
                 '__ATMAIN__.push(function() { FS.ignorePermissions = false });' +
                 '__ATEXIT__.push(function() { FS.quit() });' +
-                //Get module methods from settings
+                // Get module methods from settings
                 '{{{ EXPORTED_RUNTIME_METHODS.filter(function(func) { return func.substr(0, 3) === 'FS_' }).map(function(func){return 'Module["' + func + '"] = FS.' + func.substr(3) + ";"}).reduce(function(str, func){return str + func;}, '') }}}',
   $FS: {
     root: null,
@@ -1278,7 +1278,7 @@ mergeInto(LibraryManager.library, {
         random_device = function() { crypto.getRandomValues(randomBuffer); return randomBuffer[0]; };
       } else if (ENVIRONMENT_IS_NODE) {
         // for nodejs
-        random_device = function() { return require('crypto').randomBytes(1)[0]; };
+        random_device = function() { return require('crypto')['randomBytes'](1)[0]; };
       } else {
         // default for ES5 platforms
         random_device = function() { return (Math.random()*256)|0; };
@@ -1367,6 +1367,8 @@ mergeInto(LibraryManager.library, {
         };
         this.setErrno(errno);
         this.message = ERRNO_MESSAGES[errno];
+        // Node.js compatibility: assigning on this.stack fails on Node 4 (but fixed on Node 8)
+        if (this.stack) Object.defineProperty(this, "stack", { value: (new Error).stack });
 #if ASSERTIONS
         if (this.stack) this.stack = demangleAll(this.stack);
 #endif
@@ -1918,4 +1920,8 @@ mergeInto(LibraryManager.library, {
     }
   }
 });
+
+if (FORCE_FILESYSTEM) {
+  DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.push('$FS');
+}
 

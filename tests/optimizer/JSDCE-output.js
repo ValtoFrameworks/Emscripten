@@ -21,4 +21,19 @@ print(h(123));
  }
  print(hh(123));
 }))();
+function glue() {
+ function lookup() {
+  throw 1;
+ }
+}
+glue();
+function _glCreateShader() {
+ return 1;
+}
+function emulate() {
+ _glCreateShader = function _glCreateShader(shaderType) {
+  return glCreateShader();
+ };
+}
+emulate();
 

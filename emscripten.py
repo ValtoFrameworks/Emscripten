@@ -14,13 +14,14 @@ if __name__ == '__main__':
   ToolchainProfiler.record_process_start()
 
 import difflib
-import os, sys, json, optparse, subprocess, re, time, logging
+import os, sys, json, argparse, subprocess, re, time, logging
 import shutil
+from collections import OrderedDict
 
 from tools import shared
 from tools import jsrun, cache as cache_module, tempfiles
 from tools.response_file import read_response_file
-from tools.shared import WINDOWS
+from tools.shared import WINDOWS, asstr
 
 __rootpath__ = os.path.abspath(os.path.dirname(__file__))
 def path_from_root(*pathelems):
@@ -119,7 +120,7 @@ def compile_js(infile, settings, temp_files, DEBUG):
       logging.debug('emscript: llvm backend: ' + ' '.join(backend_args))
       t = time.time()
     with ToolchainProfiler.profile_block('emscript_llvm_backend'):
-      shared.jsrun.timeout_run(subprocess.Popen(backend_args, stdout=subprocess.PIPE), note_args=backend_args)
+      shared.jsrun.timeout_run(subprocess.Popen(backend_args, stdout=subprocess.PIPE, universal_newlines=True), note_args=backend_args)
     if DEBUG:
       logging.debug('  emscript: llvm backend took %s seconds' % (time.time() - t))
 
@@ -142,16 +143,19 @@ def parse_backend_output(backend_output, DEBUG):
   metadata_raw = backend_output[metadata_split+len(metadata_split_marker):]
   mem_init = backend_output[end_funcs+len(end_funcs_marker):metadata_split]
 
+  # we no longer use the "Runtime" object. TODO: stop emiting it in the backend
+  mem_init = mem_init.replace('Runtime.', '')
+
   try:
     #if DEBUG: print >> sys.stderr, "METAraw", metadata_raw
-    metadata = json.loads(metadata_raw)
+    metadata = json.loads(metadata_raw, object_pairs_hook=OrderedDict)
   except Exception as e:
     logging.error('emscript: failure to parse metadata output from compiler backend. raw output is: \n' + metadata_raw)
     raise e
 
-  #if DEBUG: print >> sys.stderr, "FUNCS", funcs
-  #if DEBUG: print >> sys.stderr, "META", metadata
-  #if DEBUG: print >> sys.stderr, "meminit", mem_init
+  # functions marked llvm.used in the code are exports requested by the user
+  shared.Building.user_requested_exports += metadata['exports']
+
   return funcs, metadata, mem_init
 
 
@@ -299,7 +303,7 @@ def function_tables_and_exports(funcs, metadata, mem_init, glue, forwarded_data,
     global_vars = metadata['externs']
   else:
     global_vars = [] # linkable code accesses globals through function calls
-  global_funcs = list(set([key for key, value in forwarded_json['Functions']['libraryFunctions'].items() if value != 2])
+  global_funcs = sorted(set([key for key, value in forwarded_json['Functions']['libraryFunctions'].items() if value != 2])
                       .difference(set(global_vars)).difference(implemented_functions))
   if settings['RELOCATABLE']:
     global_funcs += ['g$' + extern for extern in metadata['externs']]
@@ -377,8 +381,6 @@ def create_module(function_table_sigs, metadata, settings,
 
   asm_end = create_asm_end(exports, settings)
 
-  runtime_library_overrides = create_runtime_library_overrides(settings)
-
   module = [
     asm_start,
     temp_float,
@@ -388,11 +390,11 @@ def create_module(function_table_sigs, metadata, settings,
     start_funcs_marker
   ] + runtime_funcs + funcs_js + ['\n  ',
     pre_tables, final_function_tables, asm_end,
-    '\n', receiving, ';\n', runtime_library_overrides]
+    '\n', receiving, ';\n']
 
   if settings['SIDE_MODULE']:
     module.append('''
-Runtime.registerFunctions(%(sigs)s, Module);
+parentModule['registerFunctions'](%(sigs)s, Module);
 ''' % { 'sigs': str(list(map(str, function_table_sigs))) })
 
   return module
@@ -505,7 +507,7 @@ def update_settings_glue(settings, metadata):
     logging.warning('disabling asm.js validation due to use of non-supported features: ' + metadata['cantValidate'])
     settings['ASM_JS'] = 2
 
-  settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] = list(
+  settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] = sorted(
     set(settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] + list(map(shared.JS.to_nice_ident, metadata['declares']))).difference(
       [x[1:] for x in metadata['implementedFunctions']]
     )
@@ -563,7 +565,7 @@ def memory_and_global_initializers(pre, metadata, mem_init, settings):
                      mem_init=mem_init))
 
   if settings['SIDE_MODULE']:
-    pre = pre.replace('Runtime.GLOBAL_BASE', 'gb')
+    pre = pre.replace('GLOBAL_BASE', 'gb')
   if settings['SIDE_MODULE'] or settings['BINARYEN']:
     pre = pre.replace('{{{ STATIC_BUMP }}}', str(staticbump))
 
@@ -596,11 +598,18 @@ def get_all_implemented(forwarded_json, metadata):
   return metadata['implementedFunctions'] + list(forwarded_json['Functions']['implementedFunctions'].keys()) # XXX perf?
 
 
+# Return the list of original exports, for error reporting. It may
+# be a response file, in which case, load it
+def get_original_exported_functions(settings):
+  ret = settings['ORIGINAL_EXPORTED_FUNCTIONS']
+  if ret[0] == '@':
+    ret = json.loads(open(ret[1:]).read())
+  return ret
+
+
 def check_all_implemented(all_implemented, pre, settings):
   if settings['ASSERTIONS'] and settings.get('ORIGINAL_EXPORTED_FUNCTIONS'):
-    original_exports = settings['ORIGINAL_EXPORTED_FUNCTIONS']
-    if original_exports[0] == '@':
-      original_exports = json.loads(open(original_exports[1:]).read())
+    original_exports = get_original_exported_functions(settings)
     for requested in original_exports:
       if not is_already_implemented(requested, pre, all_implemented):
         # could be a js library func
@@ -611,7 +620,7 @@ def is_already_implemented(requested, pre, all_implemented):
   is_implemented = requested in all_implemented
   # special-case malloc, EXPORTED by default for internal use, but we bake in a trivial allocator and warn at runtime if used in ASSERTIONS
   is_exception = requested == '_malloc'
-  in_pre = ('function ' + requested.encode('utf-8')) in pre
+  in_pre = ('function ' + asstr(requested)) in pre
   return is_implemented or is_exception or in_pre
 
 def get_exported_implemented_functions(all_exported_functions, all_implemented, metadata, settings):
@@ -635,33 +644,58 @@ def get_exported_implemented_functions(all_exported_functions, all_implemented, 
       funcs += ['setTempRet0', 'getTempRet0']
     if not (settings['BINARYEN'] and settings['SIDE_MODULE']):
       funcs += ['setThrew']
-  return list(set(funcs))
+    if settings['EMTERPRETIFY']:
+      funcs += ['emterpret']
+      if settings['EMTERPRETIFY_ASYNC']:
+        funcs += ['setAsyncState', 'emtStackSave', 'emtStackRestore']
+    if settings['ASYNCIFY']:
+      funcs += ['setAsync']
+
+  return sorted(set(funcs))
 
 
 def get_implemented_functions(metadata):
   return set(metadata['implementedFunctions'])
 
+def proxy_debug_print(call_type, settings):
+  if shared.Settings.PTHREADS_DEBUG:
+    if call_type == 'sync_on_main_thread_': return 'warnOnce("sync proxying function " + code);';
+    elif call_type == 'async_on_main_thread_': return 'warnOnce("async proxying function " + code);';
+  return ''
 
 def include_asm_consts(pre, forwarded_json, metadata, settings):
   if settings['BINARYEN'] and settings['SIDE_MODULE']:
     assert len(metadata['asmConsts']) == 0, 'EM_ASM is not yet supported in shared wasm module (it cannot be stored in the wasm itself, need some solution)'
 
-  asm_consts, all_sigs = all_asm_consts(metadata)
+  asm_consts, all_sigs, call_types = all_asm_consts(metadata)
   asm_const_funcs = []
-  for sig in set(all_sigs):
-    forwarded_json['Functions']['libraryFunctions']['_emscripten_asm_const_' + sig] = 1
+  for s in range(len(all_sigs)):
+    sig = all_sigs[s]
+    call_type = call_types[s] if s < len(call_types) else ''
+    if '_emscripten_asm_const_' + call_type + sig in forwarded_json['Functions']['libraryFunctions']: continue # Only one invoker needs to be emitted for each ASM_CONST (signature x call_type) item
+    forwarded_json['Functions']['libraryFunctions']['_emscripten_asm_const_' + call_type + sig] = 1
     args = ['a%d' % i for i in range(len(sig)-1)]
     all_args = ['code'] + args
+    proxy_function = ''
+    if shared.Settings.USE_PTHREADS:
+      if call_type == 'sync_on_main_thread_': proxy_function = '_emscripten_sync_run_in_browser_thread_' + sig
+      elif call_type == 'async_on_main_thread_': proxy_function = '_emscripten_async_run_in_browser_thread_' + sig
+
+    # In proxied function calls, positive integers 1, 2, 3, ... denote pointers to regular C compiled functions. Negative integers -1, -2, -3, ... denote indices to EM_ASM() blocks, so remap the EM_ASM() indices from 0, 1, 2, ... over to the negative integers starting at -1.
+    proxy_args = '-1 - ' + ','.join(all_args)
+
+    if proxy_function: proxy_to_main_thread = '  if (ENVIRONMENT_IS_PTHREAD) { ' + proxy_debug_print(call_type, settings) + 'return ' + proxy_function + '(' + proxy_args + '); } \n'
+    else: proxy_to_main_thread = ''
     asm_const_funcs.append(r'''
 function _emscripten_asm_const_%s(%s) {
-  return ASM_CONSTS[code](%s);
-}''' % (sig.encode('utf-8'), ', '.join(all_args), ', '.join(args)))
+%s  return ASM_CONSTS[code](%s);
+}''' % (call_type + asstr(sig), ', '.join(all_args), proxy_to_main_thread, ', '.join(args)))
 
   asm_consts_text = '\nvar ASM_CONSTS = [' + ',\n '.join(asm_consts) + '];\n'
   asm_funcs_text = '\n'.join(asm_const_funcs) + '\n'
 
   body_marker = '// === Body ==='
-  return pre.replace(body_marker, body_marker + '\n' + asm_consts_text + asm_funcs_text)
+  return pre.replace(body_marker, body_marker + '\n' + asm_consts_text + asstr(asm_funcs_text))
 
 # Test if the parentheses at body[openIdx] and body[closeIdx] are a match to each other.
 def parentheses_match(body, openIdx, closeIdx):
@@ -689,19 +723,22 @@ def trim_asm_const_body(body):
 def all_asm_consts(metadata):
   asm_consts = [0]*len(metadata['asmConsts'])
   all_sigs = []
+  all_call_types = []
   for k, v in metadata['asmConsts'].items():
-    const = v[0].encode('utf-8')
+    const = asstr(v[0])
     sigs = v[1]
+    call_types = v[2] if len(v) >= 3 else None
     const = trim_asm_const_body(const)
     const = '{ ' + const + ' }'
     args = []
-    arity = max(list(map(len, sigs))) - 1
+    arity = max(map(len, sigs)) - 1
     for i in range(arity):
       args.append('$' + str(i))
     const = 'function(' + ', '.join(args) + ') ' + const
     asm_consts[int(k)] = const
     all_sigs += sigs
-  return asm_consts, all_sigs
+    if call_types: all_call_types += call_types
+  return asm_consts, all_sigs, all_call_types
 
 
 def unfloat(s):
@@ -1122,9 +1159,8 @@ def create_asm_setup(debug_tables, function_table_data, metadata, settings):
     if not settings['EMULATED_FUNCTION_POINTERS']:
       asm_setup += "\nModule['wasmMaxTableSize'] = %d;\n" % table_total_size
   if settings['RELOCATABLE']:
-    asm_setup += 'var setTempRet0 = Runtime.setTempRet0, getTempRet0 = Runtime.getTempRet0;\n'
     if not settings['SIDE_MODULE']:
-      asm_setup += 'var gb = Runtime.GLOBAL_BASE, fb = 0;\n'
+      asm_setup += 'var gb = GLOBAL_BASE, fb = 0;\n'
     side = 'parent' if settings['SIDE_MODULE'] else ''
     def check(extern):
       if settings['ASSERTIONS']:
@@ -1224,13 +1260,11 @@ def create_basic_vars(exported_implemented_functions, forwarded_json, metadata, 
 def create_exports(exported_implemented_functions, in_table, function_table_data, metadata, settings):
   quote = quoter(settings)
   asm_runtime_funcs = create_asm_runtime_funcs(settings)
-  if need_asyncify(exported_implemented_functions):
-    asm_runtime_funcs.append('setAsync')
   all_exported = exported_implemented_functions + asm_runtime_funcs + function_tables(function_table_data, settings)
   if settings['EMULATED_FUNCTION_POINTERS']:
-    all_exported = list(set(all_exported).union(in_table))
+    all_exported += in_table
   exports = []
-  for export in set(all_exported):
+  for export in sorted(set(all_exported)):
     exports.append(quote(export) + ": " + export)
   if settings['BINARYEN'] and settings['SIDE_MODULE']:
     # named globals in side wasm modules are exported globals from asm/wasm
@@ -1252,10 +1286,6 @@ def create_asm_runtime_funcs(settings):
     funcs += ['setDynamicTop']
   if settings['ONLY_MY_CODE']:
     funcs = []
-  if settings.get('EMTERPRETIFY'):
-    funcs += ['emterpret']
-    if settings.get('EMTERPRETIFY_ASYNC'):
-      funcs += ['setAsyncState', 'emtStackSave', 'emtStackRestore']
   return funcs
 
 
@@ -1267,6 +1297,9 @@ def function_tables(function_table_data, settings):
 
 
 def create_the_global(metadata, settings):
+  # the global is only needed for asm.js
+  if settings['WASM'] and settings['BINARYEN_METHOD'] == 'native-wasm':
+    return '{}'
   fundamentals = ['Math']
   fundamentals += ['Int8Array', 'Int16Array', 'Int32Array', 'Uint8Array', 'Uint16Array', 'Uint32Array', 'Float32Array', 'Float64Array']
   fundamentals += ['NaN', 'Infinity']
@@ -1487,7 +1520,7 @@ def create_asm_start_pre(asm_setup, the_global, sending, metadata, settings):
   access_quote = access_quoter(settings)
 
   shared_array_buffer = ''
-  if settings['USE_PTHREADS']:
+  if settings['USE_PTHREADS'] and not settings['WASM']:
     shared_array_buffer = "Module.asmGlobalArg['Atomics'] = Atomics;"
 
   module_get = 'Module{access} = {val};'
@@ -1495,7 +1528,7 @@ def create_asm_start_pre(asm_setup, the_global, sending, metadata, settings):
   module_library = module_get.format(access=access_quote('asmLibraryArg'), val=sending)
 
   asm_function_top = ('// EMSCRIPTEN_START_ASM\n'
-                      'var asm = (function(global, env, buffer) {')
+                      'var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {')
 
   use_asm = "'almost asm';"
   if settings['ASM_JS'] == 1:
@@ -1567,25 +1600,6 @@ def create_asm_end(exports, settings):
 ''' % (exports,
        'Module' + access_quote('asmGlobalArg'),
        'Module' + access_quote('asmLibraryArg'))
-
-
-def create_runtime_library_overrides(settings):
-  overrides = []
-  if not settings.get('SIDE_MODULE'):
-    overrides += [
-      'stackAlloc',
-      'stackSave',
-      'stackRestore',
-      'establishStackSpace',
-    ]
-    if settings['SAFE_HEAP']:
-      overrides.append('setDynamicTop')
-
-  if not settings['RELOCATABLE']:
-    overrides += ['setTempRet0', 'getTempRet0']
-
-  lines = ["Runtime.{0} = Module['{0}'];".format(func) for func in overrides]
-  return '\n'.join(lines)
 
 
 def create_first_in_asm(settings):
@@ -1840,14 +1854,13 @@ def create_exported_implemented_functions_wasm(pre, forwarded_json, metadata, se
       exported_implemented_functions.add(key)
 
   if settings['ASSERTIONS'] and settings.get('ORIGINAL_EXPORTED_FUNCTIONS'):
-    original_exports = settings['ORIGINAL_EXPORTED_FUNCTIONS']
-    if original_exports[0] == '@': original_exports = json.loads(open(original_exports[1:]).read())
+    original_exports = get_original_exported_functions(settings)
     for requested in original_exports:
       # check if already implemented
       # special-case malloc, EXPORTED by default for internal use, but we bake in a trivial allocator and warn at runtime if used in ASSERTIONS \
       if requested not in all_implemented and \
          requested != '_malloc' and \
-         (('function ' + requested.encode('utf-8')) not in pre): # could be a js library func
+         (('function ' + asstr(requested)) not in pre): # could be a js library func
         logging.warning('function requested to be exported, but not implemented: "%s"', requested)
 
   return exported_implemented_functions
@@ -1856,12 +1869,12 @@ def create_asm_consts_wasm(forwarded_json, metadata):
   asm_consts = [0]*len(metadata['asmConsts'])
   all_sigs = []
   for k, v in metadata['asmConsts'].items():
-    const = v[0].encode('utf-8')
+    const = asstr(v[0])
     sigs = v[1]
     const = trim_asm_const_body(const)
     const = '{ ' + const + ' }'
     args = []
-    arity = max(list(map(len, sigs))) - 1
+    arity = max(map(len, sigs)) - 1
     for i in range(arity):
       args.append('$' + str(i))
     const = 'function(' + ', '.join(args) + ') ' + const
@@ -1876,7 +1889,7 @@ def create_asm_consts_wasm(forwarded_json, metadata):
     asm_const_funcs.append(r'''
 function _emscripten_asm_const_%s(%s) {
 return ASM_CONSTS[code](%s);
-}''' % (sig.encode('utf-8'), ', '.join(all_args), ', '.join(args)))
+}''' % (asstr(sig), ', '.join(all_args), ', '.join(args)))
 
   return asm_consts, asm_const_funcs
 
@@ -1941,7 +1954,7 @@ def create_module_wasm(sending, receiving, invoke_funcs, settings):
 
   the_global = '{}'
 
-  if settings['USE_PTHREADS']:
+  if settings['USE_PTHREADS'] and not settings['WASM']:
     shared_array_buffer = "if (typeof SharedArrayBuffer !== 'undefined') Module.asmGlobalArg['Atomics'] = Atomics;"
   else:
     shared_array_buffer = ''
@@ -1964,15 +1977,15 @@ var asm = Module['asm'](%s, %s, buffer);
 STACKTOP = STACK_BASE + TOTAL_STACK;
 STACK_MAX = STACK_BASE;
 HEAP32[%d >> 2] = STACKTOP;
-Runtime.stackAlloc = Module['_stackAlloc'];
-Runtime.stackSave = Module['_stackSave'];
-Runtime.stackRestore = Module['_stackRestore'];
-Runtime.establishStackSpace = Module['establishStackSpace'];
+stackAlloc = Module['_stackAlloc'];
+stackSave = Module['_stackSave'];
+stackRestore = Module['_stackRestore'];
+establishStackSpace = Module['establishStackSpace'];
 ''' % shared.Settings.GLOBAL_BASE)
 
   module.append('''
-Runtime.setTempRet0 = Module['setTempRet0'];
-Runtime.getTempRet0 = Module['getTempRet0'];
+setTempRet0 = Module['setTempRet0'];
+getTempRet0 = Module['getTempRet0'];
 ''')
 
   module.append(invoke_wrappers)
@@ -2043,6 +2056,9 @@ def load_metadata(metadata_raw):
 
   # Initializers call the global var version of the export, so they get the mangled name.
   metadata['initializers'] = list(map(asmjs_mangle, metadata['initializers']))
+
+  # functions marked llvm.used in the code are exports requested by the user
+  shared.Building.user_requested_exports += metadata['exports']
 
   return metadata
 
@@ -2130,9 +2146,7 @@ def main(args, compiler_engine, cache, temp_files, DEBUG):
   for setting in args.settings:
     name, value = setting.strip().split('=', 1)
     value = json.loads(value)
-    if isinstance(value, unicode):
-      value = value.encode('utf8')
-    settings[name] = value
+    settings[name] = asstr(value)
 
   # libraries
   libraries = args.libraries[0].split(',') if len(args.libraries) > 0 else []
@@ -2167,50 +2181,54 @@ def _main(args=None):
         args[index:index+1] = response_file_args
         break
 
-  parser = optparse.OptionParser(
-    usage='usage: %prog [-h] [-H HEADERS] [-o OUTFILE] [-c COMPILER_ENGINE] [-s FOO=BAR]* infile',
+  parser = argparse.ArgumentParser(
+    usage='%(prog)s [-h] [-H HEADERS] [-o OUTFILE] [-c COMPILER_ENGINE] [-s FOO=BAR]* infile',
     description=('You should normally never use this! Use emcc instead. '
                  'This is a wrapper around the JS compiler, converting .ll to .js.'),
     epilog='')
-  parser.add_option('-H', '--headers',
+  parser.add_argument('-H', '--headers',
                     default=[],
                     action='append',
                     help='System headers (comma separated) whose #defines should be exposed to the compiled code.')
-  parser.add_option('-L', '--libraries',
+  parser.add_argument('-L', '--libraries',
                     default=[],
                     action='append',
                     help='Library files (comma separated) to use in addition to those in emscripten src/library_*.')
-  parser.add_option('-o', '--outfile',
+  parser.add_argument('-o', '--outfile',
                     default=sys.stdout,
                     help='Where to write the output; defaults to stdout.')
-  parser.add_option('-c', '--compiler',
+  parser.add_argument('-c', '--compiler',
                     default=None,
                     help='Which JS engine to use to run the compiler; defaults to the one in ~/.emscripten.')
-  parser.add_option('-s', '--setting',
+  parser.add_argument('-s', '--setting',
                     dest='settings',
                     default=[],
                     action='append',
                     metavar='FOO=BAR',
                     help=('Overrides for settings defined in settings.js. '
                           'May occur multiple times.'))
-  parser.add_option('-T', '--temp-dir',
+  parser.add_argument('-T', '--temp-dir',
                     default=None,
                     help=('Where to create temporary files.'))
-  parser.add_option('-v', '--verbose',
+  parser.add_argument('-v', '--verbose',
+                    default=None,
                     action='store_true',
                     dest='verbose',
                     help='Displays debug output')
-  parser.add_option('-q', '--quiet',
+  parser.add_argument('-q', '--quiet',
+                    default=None,
                     action='store_false',
                     dest='verbose',
                     help='Hides debug output')
-  parser.add_option('--suppressUsageWarning',
+  parser.add_argument('--suppressUsageWarning',
                     action='store_true',
                     default=os.environ.get('EMSCRIPTEN_SUPPRESS_USAGE_WARNING'),
                     help=('Suppress usage warning'))
+  parser.add_argument('infile', nargs='*')
 
   # Convert to the same format that argparse would have produced.
-  keywords, positional = parser.parse_args(args)
+  keywords = parser.parse_args(args)
+  positional = keywords.infile
 
   if not keywords.suppressUsageWarning:
     logging.warning('''
@@ -2222,7 +2240,7 @@ WARNING: You should normally never use this! Use emcc instead.
   if len(positional) != 1:
     raise RuntimeError('Must provide exactly one positional argument. Got ' + str(len(positional)) + ': "' + '", "'.join(positional) + '"')
   keywords.infile = os.path.abspath(positional[0])
-  if isinstance(keywords.outfile, basestring):
+  if isinstance(keywords.outfile, (type(u''), bytes)):
     keywords.outfile = open(keywords.outfile, 'w')
 
   if keywords.temp_dir is None:

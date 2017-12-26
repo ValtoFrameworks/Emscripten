@@ -342,6 +342,8 @@ var LibraryPThread = {
             PThread.runningWorkers.splice(PThread.runningWorkers.indexOf(worker.pthread), 1); // Not a running Worker anymore.
           } else if (d.cmd === 'objectTransfer') {
             PThread.receiveObjectTransfer(e.data);
+          } else if (e.data.target === 'setimmediate') {
+            worker.postMessage(e.data); // Worker wants to postMessage() to itself to implement setImmediate() emulation.
           } else {
             Module['printErr']("worker sent an unknown command " + d.cmd);
           }
@@ -364,7 +366,12 @@ var LibraryPThread = {
             // object in Module['mainScriptUrlOrBlob'], or a URL to it, so that pthread Workers can
             // independently load up the same main application file.
             urlOrBlob: Module['mainScriptUrlOrBlob'] || currentScriptUrl,
+#if BINARYEN
+            wasmMemory: Module['wasmMemory'],
+            wasmModule: Module['wasmModule'],
+#else
             buffer: HEAPU8.buffer,
+#endif
             tempDoublePtr: tempDoublePtr,
             TOTAL_MEMORY: TOTAL_MEMORY,
             STATICTOP: STATICTOP,

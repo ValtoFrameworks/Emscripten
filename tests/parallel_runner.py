@@ -1,16 +1,14 @@
 from __future__ import print_function
 import multiprocessing
 import os
-import pickle
 import subprocess
 import sys
-import time
-import traceback
 import unittest
 
 try:
   import queue
 except ImportError:
+  # Python 2 compatibility
   import Queue as queue
 
 def g_testing_thread(work_queue, result_queue):
@@ -58,7 +56,7 @@ class ParallelTestSuite(unittest.BaseTestSuite):
     tests = []
     for test in self:
       tests.append(test)
-    tests.sort(key=lambda test: str(test))
+    tests.sort(key=str)
     return tests[::-1]
 
   def init_processes(self, test_queue):

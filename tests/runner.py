@@ -2,7 +2,7 @@
 # This Python file uses the following encoding: utf-8
 
 '''
-Simple test runner. Consider using parallel_test_core.py for faster iteration times.
+Simple test runner.
 '''
 
 # XXX Use EM_ALL_ENGINES=1 in the env to test all engines!
@@ -36,6 +36,26 @@ sys.path += [path_from_root(''), path_from_root('third_party/websockify')]
 import tools.shared
 from tools.shared import *
 from tools.line_endings import check_line_endings
+
+# User can specify an environment variable EMSCRIPTEN_BROWSER to force the browser test suite to
+# run using another browser command line than the default system browser.
+# Setting '0' as the browser disables running a browser (but we still see tests compile)
+emscripten_browser = os.environ.get('EMSCRIPTEN_BROWSER')
+if emscripten_browser:
+  cmd = shlex.split(emscripten_browser)
+  def run_in_other_browser(url):
+    Popen(cmd + [url])
+  if EM_BUILD_VERBOSE_LEVEL >= 3:
+    print("using Emscripten browser: " + str(cmd), file=sys.stderr)
+  webbrowser.open_new = run_in_other_browser
+
+# checks if browser testing is enabled
+def has_browser():
+  return emscripten_browser != '0'
+
+# returns what browser is being used (None means the default)
+def get_browser():
+  return emscripten_browser
 
 # Sanity check for config
 
@@ -153,7 +173,7 @@ class RunnerCore(unittest.TestCase):
     return False
 
   def is_wasm_backend(self):
-    return LLVM_TARGET == WASM_TARGET
+    return Settings.WASM_BACKEND
 
   def uses_memory_init_file(self):
     if self.emcc_args is None:
@@ -248,7 +268,6 @@ class RunnerCore(unittest.TestCase):
       else:
         shutil.copy(ll_file, filename + '.o.ll')
 
-      Building.ll_opts(filename)
       if build_ll_hook:
         need_post = build_ll_hook(filename)
       Building.llvm_as(filename)
@@ -299,7 +318,7 @@ class RunnerCore(unittest.TestCase):
   # Build JavaScript code from source code
   def build(self, src, dirname, filename, output_processor=None, main_file=None, additional_files=[], libraries=[], includes=[], build_ll_hook=None, extra_emscripten_args=[], post_build=None, js_outfile=True):
 
-    Building.pick_llvm_opts(3) # pick llvm opts here, so we include changes to Settings in the test case code
+    Building.LLVM_OPT_OPTS = ['-O3'] # pick llvm opts here, so we include changes to Settings in the test case code
 
     # Copy over necessary files for compiling the source
     if main_file is None:
@@ -348,7 +367,7 @@ class RunnerCore(unittest.TestCase):
                  filename + '.o')
         if not os.path.exists(filename + '.o'):
           print("Failed to link LLVM binaries:\n\n", output)
-          raise Exception("Linkage error");
+          raise Exception("Linkage error")
 
       # Finalize
       self.prep_ll_run(filename, filename + '.o', build_ll_hook=build_ll_hook)
@@ -459,19 +478,17 @@ class RunnerCore(unittest.TestCase):
 
   def build_native(self, filename, args=[]):
     compiler = CLANG if filename.endswith('cpp') else CLANG_CC
-    process = Popen([compiler, '-O2', '-fno-math-errno', filename, '-o', filename+'.native'] + args, stdout=PIPE, stderr=self.stderr_redirect)
-    output = process.communicate()
+    process = run_process([compiler, '-O2', '-fno-math-errno', filename, '-o', filename+'.native'] + args, stdout=PIPE, stderr=self.stderr_redirect, check=False)
     if process.returncode is not 0:
       print("Building native executable with command '%s' failed with a return code %d!" % (' '.join([CLANG, '-O2', filename, '-o', filename+'.native']), process.returncode), file=sys.stderr)
-      print("Output: " + output[0])
+      print("Output: " + process.stdout)
 
   def run_native(self, filename, args):
-    process = Popen([filename+'.native'] + args, stdout=PIPE);
-    output = process.communicate()
+    process = run_process([filename+'.native'] + args, stdout=PIPE, check=False)
     if process.returncode is not 0:
       print("Running native executable with command '%s' failed with a return code %d!" % (' '.join([filename+'.native'] + args), process.returncode), file=sys.stderr)
-      print("Output: " + output[0])
-    return output[0]
+      print("Output: " + output.stdout)
+    return output.stdout
 
   # Tests that the given two paths are identical, modulo path delimiters. E.g. "C:/foo" is equal to "C:\foo".
   def assertPathsIdentical(self, path1, path2):
@@ -501,9 +518,9 @@ class RunnerCore(unittest.TestCase):
 
   def assertContained(self, values, string, additional_info=''):
     if type(values) not in [list, tuple]: values = [values]
+    values = list(map(asstr, values))
+    if callable(string): string = string()
     for value in values:
-      if not isinstance(value, bytes): string = string.decode('UTF-8') # If we have any non-ASCII chars in the expected string, treat the test string from ASCII as UTF8 as well.
-      if callable(string): string = string()
       if value in string: return # success
     raise Exception("Expected to find '%s' in '%s', diff:\n\n%s\n%s" % (
       limit_size(values[0]), limit_size(string),
@@ -535,7 +552,7 @@ class RunnerCore(unittest.TestCase):
     build_dir = self.get_build_dir()
     output_dir = self.get_dir()
 
-    cache_name = name + ','.join([opt for opt in Building.COMPILER_TEST_OPTS if len(opt) < 10]) + '_' + hashlib.md5(str(Building.COMPILER_TEST_OPTS)).hexdigest() + cache_name_extra
+    cache_name = name + ','.join([opt for opt in Building.COMPILER_TEST_OPTS if len(opt) < 10]) + '_' + hashlib.md5(str(Building.COMPILER_TEST_OPTS).encode('utf-8')).hexdigest() + cache_name_extra
 
     valid_chars = "_%s%s" % (string.ascii_letters, string.digits)
     cache_name = ''.join([(c if c in valid_chars else '_') for c in cache_name])
@@ -626,9 +643,6 @@ class RunnerCore(unittest.TestCase):
     for engine in js_engines: assert type(engine) == list
     for engine in self.banned_js_engines: assert type(engine) == list
     js_engines = [engine for engine in js_engines if engine[0] not in [banned[0] for banned in self.banned_js_engines]]
-    if 'BINARYEN_METHOD="native-wasm"' in self.emcc_args:
-      # when testing native wasm support, must use a vm with support
-      js_engines = [engine for engine in js_engines if engine == SPIDERMONKEY_ENGINE or engine == V8_ENGINE]
     return js_engines
 
   def do_run_from_file(self, src, expected_output,
@@ -714,7 +728,7 @@ class RunnerCore(unittest.TestCase):
 # Run a server and a web page. When a test runs, we tell the server about it,
 # which tells the web page, which then opens a window with the test. Doing
 # it this way then allows the page to close() itself when done.
-def harness_server_func(q):
+def harness_server_func(q, port):
   class TestServerHandler(BaseHTTPRequestHandler):
     def do_GET(s):
       s.send_response(200)
@@ -731,10 +745,11 @@ def harness_server_func(q):
     def log_request(code=0, size=0):
       # don't log; too noisy
       pass
-  httpd = HTTPServer(('localhost', 9999), TestServerHandler)
+
+  httpd = HTTPServer(('localhost', port), TestServerHandler)
   httpd.serve_forever() # test runner will kill us
 
-def server_func(dir, q):
+def server_func(dir, q, port):
   class TestServerHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
       if 'report_' in self.path:
@@ -758,7 +773,7 @@ def server_func(dir, q):
 
   SimpleHTTPRequestHandler.extensions_map['.wasm'] = 'application/wasm'
   os.chdir(dir)
-  httpd = HTTPServer(('localhost', 8888), TestServerHandler)
+  httpd = HTTPServer(('localhost', port), TestServerHandler)
   httpd.serve_forever() # test runner will kill us
 
 class BrowserCore(RunnerCore):
@@ -768,34 +783,41 @@ class BrowserCore(RunnerCore):
   @classmethod
   def setUpClass(self):
     super(BrowserCore, self).setUpClass()
+    self.also_wasm = os.environ.get('EMCC_BROWSER_ALSO_WASM', '0') == '1'
+    self.test_port = int(os.environ.get('EMCC_BROWSER_TEST_PORT', '8888'))
+    self.harness_port = int(os.environ.get('EMCC_BROWSER_HARNESS_PORT', '9999'))
+    if not has_browser(): return
     self.browser_timeout = 30
     self.harness_queue = multiprocessing.Queue()
-    self.harness_server = multiprocessing.Process(target=harness_server_func, args=(self.harness_queue,))
+    self.harness_server = multiprocessing.Process(target=harness_server_func, args=(self.harness_queue, self.harness_port))
     self.harness_server.start()
     print('[Browser harness server on process %d]' % self.harness_server.pid)
-    webbrowser.open_new('http://localhost:9999/run_harness')
+    webbrowser.open_new('http://localhost:%s/run_harness' % self.harness_port)
 
   @classmethod
   def tearDownClass(self):
     super(BrowserCore, self).tearDownClass()
+    if not has_browser(): return
     self.harness_server.terminate()
     print('[Browser harness server terminated]')
-    # On Windows, shutil.rmtree() in tearDown() raises this exception if we do not wait a bit:
-    # WindowsError: [Error 32] The process cannot access the file because it is being used by another process.
-    time.sleep(0.1)
+    if WINDOWS:
+      # On Windows, shutil.rmtree() in tearDown() raises this exception if we do not wait a bit:
+      # WindowsError: [Error 32] The process cannot access the file because it is being used by another process.
+      time.sleep(0.1)
 
   def run_browser(self, html_file, message, expectedResult=None, timeout=None):
+    if not has_browser(): return
     print('[browser launch:', html_file, ']')
     if expectedResult is not None:
       try:
         queue = multiprocessing.Queue()
-        server = multiprocessing.Process(target=functools.partial(server_func, self.get_dir()), args=(queue,))
+        server = multiprocessing.Process(target=functools.partial(server_func, self.get_dir()), args=(queue, self.test_port))
         server.start()
         # Starting the web page server above is an asynchronous procedure, so before we tell the browser below to navigate to
         # the test page, we need to know that the server has started up and is ready to process the site navigation.
         # Therefore block until we can make a connection to the server.
         for i in range(10):
-          httpconn = HTTPConnection('localhost:8888', timeout=1)
+          httpconn = HTTPConnection('localhost:%s' % self.test_port, timeout=1)
           try:
             httpconn.connect()
             httpconn.close()
@@ -804,7 +826,7 @@ class BrowserCore(RunnerCore):
             time.sleep(1)
         else:
           raise Exception('[Test harness server failed to start up in a timely manner]')
-        self.harness_queue.put('http://localhost:8888/' + html_file)
+        self.harness_queue.put('http://localhost:%s/%s' % (self.test_port, html_file))
         output = '[no http server activity]'
         start = time.time()
         if timeout is None: timeout = self.browser_timeout
@@ -841,7 +863,7 @@ class BrowserCore(RunnerCore):
       var xhr = new XMLHttpRequest();
       var result = $0;
       if (Module['pageThrewException']) result = 12345;
-      xhr.open('GET', 'http://localhost:8888/report_result?' + result, !$1);
+      xhr.open('GET', 'http://localhost:%s/report_result?' + result, !$1);
       xhr.send();
       if (!Module['pageThrewException'] /* for easy debugging, don't close window on failure */) setTimeout(function() { window.close() }, 1000);
     }, result, sync);
@@ -859,7 +881,7 @@ class BrowserCore(RunnerCore):
   #endif // ~__REPORT_RESULT_DEFINED__
 
 #endif
-''' + code
+''' % self.test_port + code
 
   def reftest(self, expected):
     # make sure the pngs used here have no color correction, using e.g.
@@ -867,7 +889,6 @@ class BrowserCore(RunnerCore):
     basename = os.path.basename(expected)
     shutil.copyfile(expected, os.path.join(self.get_dir(), basename))
     open(os.path.join(self.get_dir(), 'reftest.js'), 'w').write('''
-      var Module = eval('Module');
       function doReftest() {
         if (doReftest.done) return;
         doReftest.done = true;
@@ -913,8 +934,8 @@ class BrowserCore(RunnerCore):
             }
             var wrong = Math.floor(total / (img.width*img.height*3)); // floor, to allow some margin of error for antialiasing
 
-            xhr = new XMLHttpRequest();
-            xhr.open('GET', 'http://localhost:8888/report_result?' + wrong);
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', 'http://localhost:%s/report_result?' + wrong);
             xhr.send();
             if (wrong < 10 /* for easy debugging, don't close window on failure */) setTimeout(function() { window.close() }, 1000);
           };
@@ -944,10 +965,10 @@ class BrowserCore(RunnerCore):
         };
       }
 
-''' % basename)
+''' % (self.test_port, basename))
 
   def btest(self, filename, expected=None, reference=None, force_c=False, reference_slack=0, manual_reference=False, post_build=None,
-      args=[], outfile='test.html', message='.', also_proxied=False, url_suffix='', timeout=None): # TODO: use in all other tests
+            args=[], outfile='test.html', message='.', also_proxied=False, url_suffix='', timeout=None, also_wasm=True): # TODO: use in all other tests
     # if we are provided the source and not a path, use that
     filename_is_src = '\n' in filename
     src = filename if filename_is_src else ''
@@ -975,13 +996,16 @@ class BrowserCore(RunnerCore):
     if post_build: post_build()
     if not isinstance(expected, list): expected = [expected]
     self.run_browser(outfile + url_suffix, message, ['/report_result?' + e for e in expected], timeout=timeout)
+    if also_wasm and self.also_wasm:
+      wasm_args = args + ['-s', 'WASM=1']
+      # Filter out separate-asm, which is implied by wasm
+      wasm_args = [a for a in wasm_args if a != '--separate-asm']
+      # wasm doesn't support USE_PTHREADS=2
+      wasm_args = ['USE_PTHREADS=1' if a == 'USE_PTHREADS=2' else a for a in wasm_args]
+      self.btest(filename, expected, reference, force_c, reference_slack, manual_reference, post_build,
+                 wasm_args, outfile, message, also_proxied=False, timeout=timeout, also_wasm=False)
     if also_proxied:
       print('proxied...')
-      # save non-proxied
-      if not os.path.exists('normal'):
-        os.mkdir('normal')
-      shutil.copyfile('test.html', os.path.join('normal', 'test.html'))
-      shutil.copyfile('test.js', os.path.join('normal', 'test.js'))
       if reference:
         assert not manual_reference
         manual_reference = True

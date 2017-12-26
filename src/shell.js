@@ -1,24 +1,29 @@
+#if SIDE_MODULE == 0
 // The Module object: Our interface to the outside world. We import
-// and export values on it, and do the work to get that through
-// closure compiler if necessary. There are various ways Module can be used:
+// and export values on it. There are various ways Module can be used:
 // 1. Not defined. We create it here
 // 2. A function parameter, function(Module) { ..generated code.. }
 // 3. pre-run appended it, var Module = {}; ..generated code..
 // 4. External script tag defines var Module.
-// We need to do an eval in order to handle the closure compiler
-// case, where this code here is minified but Module was defined
-// elsewhere (e.g. case 4 above). We also need to check if Module
-// already exists (e.g. case 3 above).
+// We need to check if Module already exists (e.g. case 3 above).
+// Substitution will be replaced with actual code on later stage of the build,
+// this way Closure Compiler will not mangle it (e.g. case 4. above).
 // Note that if you want to run closure, and also to use Module
 // after the generated code, you will need to define   var Module = {};
 // before the code. Then that object will be used in the code, and you
 // can continue to use Module afterwards as well.
-var Module;
 #if USE_CLOSURE_COMPILER
-if (!Module) Module = eval('(function() { try { return {{{ EXPORT_NAME }}} || {} } catch(e) { return {} } })()');
+// if (!Module)` is crucial for Closure Compiler here as it will otherwise replace every `Module` occurrence with a string
+var Module;
+if (!Module) Module = "__EMSCRIPTEN_PRIVATE_MODULE_EXPORT_NAME_SUBSTITUTION__";
 #else
-if (!Module) Module = (typeof {{{ EXPORT_NAME }}} !== 'undefined' ? {{{ EXPORT_NAME }}} : null) || {};
-#endif
+var Module = typeof {{{ EXPORT_NAME }}} !== 'undefined' ? {{{ EXPORT_NAME }}} : {};
+#endif // USE_CLOSURE_COMPILER
+#endif // SIDE_MODULE
+
+// --pre-jses are emitted after the Module integration code, so that they can
+// refer to Module (if they choose; they can also define Module)
+// {{PRE_JSES}}
 
 // Sometimes an existing Module object exists with properties
 // meant to overwrite the default module functionality. Here
@@ -26,7 +31,8 @@ if (!Module) Module = (typeof {{{ EXPORT_NAME }}} !== 'undefined' ? {{{ EXPORT_N
 // the current environment's defaults to avoid having to be so
 // defensive during initialization.
 var moduleOverrides = {};
-for (var key in Module) {
+var key;
+for (key in Module) {
   if (Module.hasOwnProperty(key)) {
     moduleOverrides[key] = Module[key];
   }
@@ -105,10 +111,6 @@ if (ENVIRONMENT_IS_NODE) {
     return ret;
   };
 
-  Module['load'] = function load(f) {
-    globalEval(read(f));
-  };
-
   if (!Module['thisProgram']) {
     if (process['argv'].length > 1) {
       Module['thisProgram'] = process['argv'][1].replace(/\\/g, '/');
@@ -135,6 +137,14 @@ if (ENVIRONMENT_IS_NODE) {
     }
   });
 #endif
+  // Currently node will swallow unhandled rejections, but this behavior is
+  // deprecated, and in the future it will exit with error status.
+  process['on']('unhandledRejection', function(reason, p) {
+#if ASSERTIONS
+    Module['printErr']('node.js exiting due to unhandled promise rejection');
+#endif
+    process['exit'](1);
+  });
 
   Module['inspect'] = function () { return '[Emscripten Module object]'; };
 }
@@ -183,10 +193,6 @@ else if (ENVIRONMENT_IS_SHELL) {
       quit(status);
     }
   }
-
-#if USE_CLOSURE_COMPILER
-  eval("if (typeof gc === 'function' && gc.toString().indexOf('[native code]') > 0) var gc = undefined"); // wipe out the SpiderMonkey shell 'gc' function, which can confuse closure (uses it as a minified name, and it is then initted to a non-falsey value unexpectedly)
-#endif
 }
 else if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
   Module['read'] = function shell_read(url) {
@@ -220,7 +226,7 @@ else if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
         return new Uint8Array(xhr.response);
 #if SUPPORT_BASE64_EMBEDDING
       } catch (err) {
-        var data = tryParseAsDataURI(f);
+        var data = tryParseAsDataURI(url);
         if (data) {
           return data;
         }
@@ -273,10 +279,6 @@ else if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
     }));
   }
 
-  if (ENVIRONMENT_IS_WORKER) {
-    Module['load'] = importScripts;
-  }
-
   if (typeof Module['setWindowTitle'] === 'undefined') {
     Module['setWindowTitle'] = function(title) { document.title = title };
   }
@@ -286,14 +288,6 @@ else {
   throw new Error('Unknown runtime environment. Where are we?');
 }
 
-function globalEval(x) {
-  {{{ makeEval('eval.call(null, x);') }}}
-}
-if (!Module['load'] && Module['read']) {
-  Module['load'] = function load(f) {
-    globalEval(Module['read'](f));
-  };
-}
 if (!Module['print']) {
   Module['print'] = function(){};
 }
@@ -323,7 +317,7 @@ Module['preRun'] = [];
 Module['postRun'] = [];
 
 // Merge back in the overrides
-for (var key in moduleOverrides) {
+for (key in moduleOverrides) {
   if (moduleOverrides.hasOwnProperty(key)) {
     Module[key] = moduleOverrides[key];
   }

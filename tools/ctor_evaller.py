@@ -247,7 +247,7 @@ console.log(JSON.stringify([numSuccessful, Array.prototype.slice.call(heap.subar
     err_file = config.get_temp_files().get('.err').name
     out_file_handle = open(out_file, 'w')
     err_file_handle = open(err_file, 'w')
-    proc = subprocess.Popen(shared.NODE_JS + [temp_file], stdout=out_file_handle, stderr=err_file_handle)
+    proc = subprocess.Popen(shared.NODE_JS + [temp_file], stdout=out_file_handle, stderr=err_file_handle, universal_newlines=True)
     try:
       shared.jsrun.timeout_run(proc, timeout=10, full_output=True, throw_on_failure=False)
     except Exception as e:
@@ -266,7 +266,7 @@ console.log(JSON.stringify([numSuccessful, Array.prototype.slice.call(heap.subar
 
   # out contains the new mem init and other info
   num_successful, mem_init_raw, atexits = json.loads(out_result)
-  mem_init = ''.join(map(chr, mem_init_raw))
+  mem_init = bytes(bytearray(mem_init_raw))
   total_ctors = len(all_ctors)
   if num_successful < total_ctors:
     shared.logging.debug('not all ctors could be evalled, something was used that was not safe (and therefore was not defined, and caused an error):\n========\n' + err_result + '========')
@@ -289,7 +289,7 @@ def eval_ctors_wasm(js, wasm_file, num):
   if debug_info:
     cmd += ['-g']
   shared.logging.debug('wasm ctor cmd: ' + str(cmd))
-  out, err = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+  err = shared.run_process(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stderr
   num_successful = err.count('success on')
   shared.logging.debug(err)
   if len(ctors) == num_successful:
@@ -322,7 +322,7 @@ if __name__ == '__main__':
     # js path
     mem_init_file = binary_file
     if os.path.exists(mem_init_file):
-      mem_init = json.dumps(list(map(ord, open(mem_init_file, 'rb').read())))
+      mem_init = json.dumps(list(bytearray(open(mem_init_file, 'rb').read())))
     else:
       mem_init = []
 

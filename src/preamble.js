@@ -1,5 +1,3 @@
-// {{PREAMBLE_ADDITIONS}}
-
 // === Preamble library stuff ===
 
 // Documentation for the public APIs defined in this file must be updated in:
@@ -9,22 +7,6 @@
 // You can also build docs locally as HTML or other formats in site/
 // An online HTML version (which may be of a different version of Emscripten)
 //    is up at http://kripken.github.io/emscripten-site/docs/api_reference/preamble.js.html
-
-//========================================
-// Runtime code shared with compiler
-//========================================
-
-{{RUNTIME}}
-
-#if RELOCATABLE
-Runtime.GLOBAL_BASE = Runtime.alignMemory(Runtime.GLOBAL_BASE, {{{ MAX_GLOBAL_ALIGN || 1 }}});
-#endif
-
-{{{ maybeExport('Runtime') }}}
-#if USE_CLOSURE_COMPILER
-Runtime['addFunction'] = Runtime.addFunction;
-Runtime['removeFunction'] = Runtime.removeFunction;
-#endif
 
 #if BENCHMARK
 Module.realPrint = Module.print;
@@ -125,170 +107,98 @@ var globalScope = this;
 // Returns the C function with a specified identifier (for C++, you need to do manual name mangling)
 function getCFunc(ident) {
   var func = Module['_' + ident]; // closure exported function
-  if (!func) {
-    {{{ makeEval("try { func = eval('_' + ident); } catch(e) {}") }}}
-  }
-  assert(func, 'Cannot call unknown function ' + ident + ' (perhaps LLVM optimizations or closure removed it?)');
+  assert(func, 'Cannot call unknown function ' + ident + ', make sure it is exported');
   return func;
 }
 
-var cwrap, ccall;
-(function(){
-  var JSfuncs = {
-    // Helpers for cwrap -- it can't refer to Runtime directly because it might
-    // be renamed by closure, instead it calls JSfuncs['stackSave'].body to find
-    // out what the minified function name is.
-    'stackSave': function() {
-      Runtime.stackSave()
-    },
-    'stackRestore': function() {
-      Runtime.stackRestore()
-    },
-    // type conversion from js to c
-    'arrayToC' : function(arr) {
-      var ret = Runtime.stackAlloc(arr.length);
-      writeArrayToMemory(arr, ret);
-      return ret;
-    },
-    'stringToC' : function(str) {
-      var ret = 0;
-      if (str !== null && str !== undefined && str !== 0) { // null string
-        // at most 4 bytes per UTF-8 code point, +1 for the trailing '\0'
-        var len = (str.length << 2) + 1;
-        ret = Runtime.stackAlloc(len);
-        stringToUTF8(str, ret, len);
-      }
-      return ret;
-    }
-  };
-  // For fast lookup of conversion functions
-  var toC = {'string' : JSfuncs['stringToC'], 'array' : JSfuncs['arrayToC']};
-
-  // C calling interface.
-  ccall = function ccallFunc(ident, returnType, argTypes, args, opts) {
-    var func = getCFunc(ident);
-    var cArgs = [];
-    var stack = 0;
-#if ASSERTIONS
-    assert(returnType !== 'array', 'Return type should not be "array".');
-#endif
-    if (args) {
-      for (var i = 0; i < args.length; i++) {
-        var converter = toC[argTypes[i]];
-        if (converter) {
-          if (stack === 0) stack = Runtime.stackSave();
-          cArgs[i] = converter(args[i]);
-        } else {
-          cArgs[i] = args[i];
-        }
-      }
-    }
-    var ret = func.apply(null, cArgs);
-#if ASSERTIONS
-    if ((!opts || !opts.async) && typeof EmterpreterAsync === 'object') {
-      assert(!EmterpreterAsync.state, 'cannot start async op with normal JS calling ccall');
-    }
-    if (opts && opts.async) assert(!returnType, 'async ccalls cannot return values');
-#endif
-    if (returnType === 'string') ret = Pointer_stringify(ret);
-    if (stack !== 0) {
-      if (opts && opts.async) {
-        EmterpreterAsync.asyncFinalizers.push(function() {
-          Runtime.stackRestore(stack);
-        });
-        return;
-      }
-      Runtime.stackRestore(stack);
+var JSfuncs = {
+  // Helpers for cwrap -- it can't refer to Runtime directly because it might
+  // be renamed by closure, instead it calls JSfuncs['stackSave'].body to find
+  // out what the minified function name is.
+  'stackSave': function() {
+    stackSave()
+  },
+  'stackRestore': function() {
+    stackRestore()
+  },
+  // type conversion from js to c
+  'arrayToC' : function(arr) {
+    var ret = stackAlloc(arr.length);
+    writeArrayToMemory(arr, ret);
+    return ret;
+  },
+  'stringToC' : function(str) {
+    var ret = 0;
+    if (str !== null && str !== undefined && str !== 0) { // null string
+      // at most 4 bytes per UTF-8 code point, +1 for the trailing '\0'
+      var len = (str.length << 2) + 1;
+      ret = stackAlloc(len);
+      stringToUTF8(str, ret, len);
     }
     return ret;
   }
+};
+// For fast lookup of conversion functions
+var toC = {'string' : JSfuncs['stringToC'], 'array' : JSfuncs['arrayToC']};
 
-#if NO_DYNAMIC_EXECUTION == 0
-  var sourceRegex = /^function\s*[a-zA-Z$_0-9]*\s*\(([^)]*)\)\s*{\s*([^*]*?)[\s;]*(?:return\s*(.*?)[;\s]*)?}$/;
-  function parseJSFunc(jsfunc) {
-    // Match the body and the return value of a javascript function source
-    var parsed = jsfunc.toString().match(sourceRegex).slice(1);
-    return {arguments : parsed[0], body : parsed[1], returnValue: parsed[2]}
-  }
-
-  // sources of useful functions. we create this lazily as it can trigger a source decompression on this entire file
-  var JSsource = null;
-  function ensureJSsource() {
-    if (!JSsource) {
-      JSsource = {};
-      for (var fun in JSfuncs) {
-        if (JSfuncs.hasOwnProperty(fun)) {
-          // Elements of toCsource are arrays of three items:
-          // the code, and the return value
-          JSsource[fun] = parseJSFunc(JSfuncs[fun]);
-        }
+// C calling interface.
+function ccall (ident, returnType, argTypes, args, opts) {
+  var func = getCFunc(ident);
+  var cArgs = [];
+  var stack = 0;
+#if ASSERTIONS
+  assert(returnType !== 'array', 'Return type should not be "array".');
+#endif
+  if (args) {
+    for (var i = 0; i < args.length; i++) {
+      var converter = toC[argTypes[i]];
+      if (converter) {
+        if (stack === 0) stack = stackSave();
+        cArgs[i] = converter(args[i]);
+      } else {
+        cArgs[i] = args[i];
       }
     }
   }
-
-  cwrap = function cwrap(ident, returnType, argTypes) {
-    argTypes = argTypes || [];
-    var cfunc = getCFunc(ident);
-    // When the function takes numbers and returns a number, we can just return
-    // the original function
-    var numericArgs = argTypes.every(function(type){ return type === 'number'});
-    var numericRet = (returnType !== 'string');
-    if ( numericRet && numericArgs) {
-      return cfunc;
-    }
-    // Creation of the arguments list (["$1","$2",...,"$nargs"])
-    var argNames = argTypes.map(function(x,i){return '$'+i});
-    var funcstr = "(function(" + argNames.join(',') + ") {";
-    var nargs = argTypes.length;
-    if (!numericArgs) {
-      // Generate the code needed to convert the arguments from javascript
-      // values to pointers
-      ensureJSsource();
-      funcstr += 'var stack = ' + JSsource['stackSave'].body + ';';
-      for (var i = 0; i < nargs; i++) {
-        var arg = argNames[i], type = argTypes[i];
-        if (type === 'number') continue;
-        var convertCode = JSsource[type + 'ToC']; // [code, return]
-        funcstr += 'var ' + convertCode.arguments + ' = ' + arg + ';';
-        funcstr += convertCode.body + ';';
-        funcstr += arg + '=(' + convertCode.returnValue + ');';
-      }
-    }
-
-    // When the code is compressed, the name of cfunc is not literally 'cfunc' anymore
-    var cfuncname = parseJSFunc(function(){return cfunc}).returnValue;
-    // Call the function
-    funcstr += 'var ret = ' + cfuncname + '(' + argNames.join(',') + ');';
-    if (!numericRet) { // Return type can only by 'string' or 'number'
-      // Convert the result to a string
-      var strgfy = parseJSFunc(function(){return Pointer_stringify}).returnValue;
-      funcstr += 'ret = ' + strgfy + '(ret);';
-    }
+  var ret = func.apply(null, cArgs);
 #if ASSERTIONS
-    funcstr += "if (typeof EmterpreterAsync === 'object') { assert(!EmterpreterAsync.state, 'cannot start async op with normal JS calling cwrap') }";
-#endif
-    if (!numericArgs) {
-      // If we had a stack, restore it
-      ensureJSsource();
-      funcstr += JSsource['stackRestore'].body.replace('()', '(stack)') + ';';
-    }
-    funcstr += 'return ret})';
-    return eval(funcstr);
-  };
-#else
-  // NO_DYNAMIC_EXECUTION is on, so we can't use the fast version of cwrap.
-  // Fall back to returning a bound version of ccall.
-  cwrap = function cwrap(ident, returnType, argTypes) {
-    return function() {
-#if ASSERTIONS
-      Runtime.warnOnce('NO_DYNAMIC_EXECUTION was set, '
-                     + 'using slow cwrap implementation');
-#endif
-      return ccall(ident, returnType, argTypes, arguments);
-    }
+#if EMTERPRETIFY_ASYNC
+  if ((!opts || !opts.async) && typeof EmterpreterAsync === 'object') {
+    assert(!EmterpreterAsync.state, 'cannot start async op with normal JS calling ccall');
   }
+  if (opts && opts.async) assert(!returnType, 'async ccalls cannot return values');
 #endif
-})();
+#endif
+  if (returnType === 'string') ret = Pointer_stringify(ret);
+  if (stack !== 0) {
+#if EMTERPRETIFY_ASYNC
+    if (opts && opts.async) {
+      EmterpreterAsync.asyncFinalizers.push(function() {
+        stackRestore(stack);
+      });
+      return;
+    }
+#endif
+    stackRestore(stack);
+  }
+  return ret;
+}
+
+function cwrap (ident, returnType, argTypes) {
+  argTypes = argTypes || [];
+  var cfunc = getCFunc(ident);
+  // When the function takes numbers and returns a number, we can just return
+  // the original function
+  var numericArgs = argTypes.every(function(type){ return type === 'number'});
+  var numericRet = returnType !== 'string';
+  if (numericRet && numericArgs) {
+    return cfunc;
+  }
+  return function() {
+    return ccall(ident, returnType, argTypes, arguments);
+  }
+}
+
 {{{ maybeExport("ccall") }}}
 {{{ maybeExport("cwrap") }}}
 
@@ -366,11 +276,11 @@ var ALLOC_STACK = 1; // Lives for the duration of the current function call
 var ALLOC_STATIC = 2; // Cannot be freed
 var ALLOC_DYNAMIC = 3; // Cannot be freed except through sbrk
 var ALLOC_NONE = 4; // Do not allocate
-{{{ maybeExport('ALLOC_NORMAL') }}}
-{{{ maybeExport('ALLOC_STACK') }}}
-{{{ maybeExport('ALLOC_STATIC') }}}
-{{{ maybeExport('ALLOC_DYNAMIC') }}}
-{{{ maybeExport('ALLOC_NONE') }}}
+{{{ maybeExportNumber('ALLOC_NORMAL') }}}
+{{{ maybeExportNumber('ALLOC_STACK') }}}
+{{{ maybeExportNumber('ALLOC_STATIC') }}}
+{{{ maybeExportNumber('ALLOC_DYNAMIC') }}}
+{{{ maybeExportNumber('ALLOC_NONE') }}}
 
 // allocate(): This is for internal use. You can use it yourself as well, but the interface
 //             is a little tricky (see docs right below). The reason is that it is optimized
@@ -402,11 +312,12 @@ function allocate(slab, types, allocator, ptr) {
   if (allocator == ALLOC_NONE) {
     ret = ptr;
   } else {
-    ret = [typeof _malloc === 'function' ? _malloc : Runtime.staticAlloc, Runtime.stackAlloc, Runtime.staticAlloc, Runtime.dynamicAlloc][allocator === undefined ? ALLOC_STATIC : allocator](Math.max(size, singleType ? 1 : types.length));
+    ret = [typeof _malloc === 'function' ? _malloc : staticAlloc, stackAlloc, staticAlloc, dynamicAlloc][allocator === undefined ? ALLOC_STATIC : allocator](Math.max(size, singleType ? 1 : types.length));
   }
 
   if (zeroinit) {
-    var ptr = ret, stop;
+    var stop;
+    ptr = ret;
     assert((ret & 3) == 0);
     stop = ret + (size & ~3);
     for (; ptr < stop; ptr += 4) {
@@ -432,10 +343,6 @@ function allocate(slab, types, allocator, ptr) {
   while (i < size) {
     var curr = slab[i];
 
-    if (typeof curr === 'function') {
-      curr = Runtime.getFunctionIndex(curr);
-    }
-
     type = singleType || types[i];
     if (type === 0) {
       i++;
@@ -451,7 +358,7 @@ function allocate(slab, types, allocator, ptr) {
 
     // no need to look up size unless type changes, so cache it
     if (previousType !== type) {
-      typeSize = Runtime.getNativeTypeSize(type);
+      typeSize = getNativeTypeSize(type);
       previousType = type;
     }
     i += typeSize;
@@ -463,8 +370,8 @@ function allocate(slab, types, allocator, ptr) {
 
 // Allocate memory during any stage of startup - static memory early on, dynamic memory later, malloc when ready
 function getMemory(size) {
-  if (!staticSealed) return Runtime.staticAlloc(size);
-  if (!runtimeInitialized) return Runtime.dynamicAlloc(size);
+  if (!staticSealed) return staticAlloc(size);
+  if (!runtimeInitialized) return dynamicAlloc(size);
   return _malloc(size);
 }
 {{{ maybeExport('getMemory') }}}
@@ -502,7 +409,7 @@ function Pointer_stringify(ptr, length) {
     }
     return ret;
   }
-  return Module['UTF8ToString'](ptr);
+  return UTF8ToString(ptr);
 }
 {{{ maybeExport('Pointer_stringify') }}}
 
@@ -862,36 +769,40 @@ function lengthBytesUTF32(str) {
 {{{ maybeExport('lengthBytesUTF32') }}}
 
 function demangle(func) {
+#if DEMANGLE_SUPPORT
   var __cxa_demangle_func = Module['___cxa_demangle'] || Module['__cxa_demangle'];
-  if (__cxa_demangle_func) {
-    try {
-      var s =
+  assert(__cxa_demangle_func);
+  try {
+    var s =
 #if WASM_BACKEND
-        func;
+      func;
 #else
-        func.substr(1);
+      func.substr(1);
 #endif
-      var len = lengthBytesUTF8(s)+1;
-      var buf = _malloc(len);
-      stringToUTF8(s, buf, len);
-      var status = _malloc(4);
-      var ret = __cxa_demangle_func(buf, 0, 0, status);
-      if (getValue(status, 'i32') === 0 && ret) {
-        return Pointer_stringify(ret);
-      }
-      // otherwise, libcxxabi failed
-    } catch(e) {
-      // ignore problems here
-    } finally {
-      if (buf) _free(buf);
-      if (status) _free(status);
-      if (ret) _free(ret);
+    var len = lengthBytesUTF8(s)+1;
+    var buf = _malloc(len);
+    stringToUTF8(s, buf, len);
+    var status = _malloc(4);
+    var ret = __cxa_demangle_func(buf, 0, 0, status);
+    if ({{{ makeGetValue('status', '0', 'i32') }}} === 0 && ret) {
+      return Pointer_stringify(ret);
     }
-    // failure when using libcxxabi, don't demangle
-    return func;
+    // otherwise, libcxxabi failed
+  } catch(e) {
+    // ignore problems here
+  } finally {
+    if (buf) _free(buf);
+    if (status) _free(status);
+    if (ret) _free(ret);
   }
-  Runtime.warnOnce('warning: build with  -s DEMANGLE_SUPPORT=1  to link in libcxxabi demangling');
+  // failure when using libcxxabi, don't demangle
   return func;
+#else // DEMANGLE_SUPPORT
+#if ASSERTIONS
+  warnOnce('warning: build with  -s DEMANGLE_SUPPORT=1  to link in libcxxabi demangling');
+#endif // ASSERTIONS
+  return func;
+#endif // DEMANGLE_SUPPORT
 }
 
 function demangleAll(text) {
@@ -1022,7 +933,7 @@ function checkStackCookie() {
 }
 
 function abortStackOverflow(allocSize) {
-  abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (STACK_MAX - Module['asm'].stackSave() + allocSize) + ' bytes available!');
+  abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (STACK_MAX - stackSave() + allocSize) + ' bytes available!');
 }
 #endif
 
@@ -1185,6 +1096,7 @@ if (typeof SharedArrayBuffer === 'undefined' || typeof Atomics === 'undefined') 
 #endif
 
 #if USE_PTHREADS
+#if !BINARYEN
 if (typeof SharedArrayBuffer !== 'undefined') {
   if (!ENVIRONMENT_IS_PTHREAD) buffer = new SharedArrayBuffer(TOTAL_MEMORY);
   // Currently SharedArrayBuffer does not have a slice() operation, so polyfill it in.
@@ -1237,6 +1149,18 @@ if (typeof Atomics === 'undefined') {
   Atomics['xor'] = function(t, i, v) { var w = t[i]; t[i] ^= v; return w; }
 }
 
+#else
+if (!ENVIRONMENT_IS_PTHREAD) {
+#if ALLOW_MEMORY_GROWTH
+  Module['wasmMemory'] = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE , 'maximum': {{{ WASM_MEM_MAX }}} / WASM_PAGE_SIZE, 'shared': true });
+#else
+  Module['wasmMemory'] = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE , 'maximum': TOTAL_MEMORY / WASM_PAGE_SIZE, 'shared': true });
+#endif
+  buffer = Module['wasmMemory'].buffer;
+}
+
+updateGlobalBufferViews();
+#endif // !BINARYEN
 #else // USE_PTHREADS
 
 #if SPLIT_MEMORY == 0
@@ -1252,28 +1176,28 @@ if (Module['buffer']) {
   if (typeof WebAssembly === 'object' && typeof WebAssembly.Memory === 'function') {
 #if ASSERTIONS
     assert(TOTAL_MEMORY % WASM_PAGE_SIZE === 0);
-#endif
+#endif // ASSERTIONS
 #if ALLOW_MEMORY_GROWTH
-#if BINARYEN_MEM_MAX
+#if WASM_MEM_MAX
 #if ASSERTIONS
-    assert({{{ BINARYEN_MEM_MAX }}} % WASM_PAGE_SIZE == 0);
+    assert({{{ WASM_MEM_MAX }}} % WASM_PAGE_SIZE == 0);
 #endif
-    Module['wasmMemory'] = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE, 'maximum': {{{ BINARYEN_MEM_MAX }}} / WASM_PAGE_SIZE });
+    Module['wasmMemory'] = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE, 'maximum': {{{ WASM_MEM_MAX }}} / WASM_PAGE_SIZE });
 #else
     Module['wasmMemory'] = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE });
-#endif
+#endif // BINARYEN_MEM_MAX
 #else
     Module['wasmMemory'] = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE, 'maximum': TOTAL_MEMORY / WASM_PAGE_SIZE });
-#endif
+#endif // ALLOW_MEMORY_GROWTH
     buffer = Module['wasmMemory'].buffer;
   } else
-#endif
+#endif // BINARYEN
   {
     buffer = new ArrayBuffer(TOTAL_MEMORY);
   }
 #if ASSERTIONS
   assert(buffer.byteLength === TOTAL_MEMORY);
-#endif
+#endif // ASSERTIONS
 }
 updateGlobalBufferViews();
 #else // SPLIT_MEMORY
@@ -1711,7 +1635,7 @@ function addOnPostRun(cb) {
 // to be secure from out of bounds writes.
 /** @deprecated */
 function writeStringToMemory(string, buffer, dontAddNull) {
-  Runtime.warnOnce('writeStringToMemory is deprecated and should not be called! Use stringToUTF8() instead!');
+  warnOnce('writeStringToMemory is deprecated and should not be called! Use stringToUTF8() instead!');
 
   var /** @type {number} */ lastChar, /** @type {number} */ end;
   if (dontAddNull) {
@@ -1749,6 +1673,7 @@ function writeAsciiToMemory(str, buffer, dontAddNull) {
 {{{ unSign }}}
 {{{ reSign }}}
 
+#if LEGACY_VM_SUPPORT
 // check for imul support, and also for correctness ( https://bugs.webkit.org/show_bug.cgi?id=126345 )
 if (!Math['imul'] || Math['imul'](0xffffffff, 5) !== -5) Math['imul'] = function imul(a, b) {
   var ah  = a >>> 16;
@@ -1788,6 +1713,9 @@ if (!Math['trunc']) Math['trunc'] = function(x) {
   return x < 0 ? Math.ceil(x) : Math.floor(x);
 };
 Math.trunc = Math['trunc'];
+#else // LEGACY_VM_SUPPORT
+assert(Math['imul'] && Math['fround'] && Math['clz32'] && Math['trunc'], 'this is a legacy browser, build with LEGACY_VM_SUPPORT');
+#endif // LEGACY_VM_SUPPORT
 
 var Math_abs = Math.abs;
 var Math_cos = Math.cos;
@@ -1940,7 +1868,7 @@ addOnPreRun(function() {
   function loadDynamicLibraries(libs) {
     if (libs) {
       libs.forEach(function(lib) {
-        Runtime.loadDynamicLibrary(lib);
+        loadDynamicLibrary(lib);
       });
     }
     if (Module['asm']['runPostSets']) {
@@ -2059,6 +1987,8 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
 var cyberDWARFFile = '{{{ BUNDLED_CD_DEBUG_FILE }}}';
 #endif
 
+#include "URIUtils.js"
+
 #if BINARYEN
 function integrateWasmJS() {
   // wasm.js has several methods for creating the compiled code module here:
@@ -2067,63 +1997,70 @@ function integrateWasmJS() {
   //  * 'interpret-binary': load binary wasm and interpret
   //  * 'interpret-asm2wasm': load asm.js code, translate to wasm, and interpret
   //  * 'asmjs': no wasm, just load the asm.js code and use that (good for testing)
-  // The method can be set at compile time (BINARYEN_METHOD), or runtime by setting Module['wasmJSMethod'].
+  // The method is set at compile time (BINARYEN_METHOD)
   // The method can be a comma-separated list, in which case, we will try the
   // options one by one. Some of them can fail gracefully, and then we can try
   // the next.
 
   // inputs
 
-  var method = Module['wasmJSMethod'] || '{{{ BINARYEN_METHOD }}}';
-  Module['wasmJSMethod'] = method;
+  var method = '{{{ BINARYEN_METHOD }}}';
 
-  var wasmTextFile = Module['wasmTextFile'] || '{{{ WASM_TEXT_FILE }}}';
-  var wasmBinaryFile = Module['wasmBinaryFile'] || '{{{ WASM_BINARY_FILE }}}';
-  var asmjsCodeFile = Module['asmjsCodeFile'] || '{{{ ASMJS_CODE_FILE }}}';
+  var wasmTextFile = '{{{ WASM_TEXT_FILE }}}';
+  var wasmBinaryFile = '{{{ WASM_BINARY_FILE }}}';
+  var asmjsCodeFile = '{{{ ASMJS_CODE_FILE }}}';
 
   if (typeof Module['locateFile'] === 'function') {
-    wasmTextFile = Module['locateFile'](wasmTextFile);
-    wasmBinaryFile = Module['locateFile'](wasmBinaryFile);
-    asmjsCodeFile = Module['locateFile'](asmjsCodeFile);
+    if (!isDataURI(wasmTextFile)) {
+      wasmTextFile = Module['locateFile'](wasmTextFile);
+    }
+    if (!isDataURI(wasmBinaryFile)) {
+      wasmBinaryFile = Module['locateFile'](wasmBinaryFile);
+    }
+    if (!isDataURI(asmjsCodeFile)) {
+      asmjsCodeFile = Module['locateFile'](asmjsCodeFile);
+    }
   }
 
   // utilities
 
   var wasmPageSize = 64*1024;
 
-  var asm2wasmImports = { // special asm2wasm imports
-    "f64-rem": function(x, y) {
-      return x % y;
-    },
-    "f64-to-int": function(x) {
-      return x | 0;
-    },
-    "i32s-div": function(x, y) {
-      return ((x | 0) / (y | 0)) | 0;
-    },
-    "i32u-div": function(x, y) {
-      return ((x >>> 0) / (y >>> 0)) >>> 0;
-    },
-    "i32s-rem": function(x, y) {
-      return ((x | 0) % (y | 0)) | 0;
-    },
-    "i32u-rem": function(x, y) {
-      return ((x >>> 0) % (y >>> 0)) >>> 0;
-    },
-    "debugger": function() {
-      debugger;
-    },
-  };
-
   var info = {
     'global': null,
     'env': null,
-    'asm2wasm': asm2wasmImports,
+    'asm2wasm': { // special asm2wasm imports
+      "f64-rem": function(x, y) {
+        return x % y;
+      },
+      "debugger": function() {
+        debugger;
+      }
+#if NEED_ALL_ASM2WASM_IMPORTS
+      ,
+      "f64-to-int": function(x) {
+        return x | 0;
+      },
+      "i32s-div": function(x, y) {
+        return ((x | 0) / (y | 0)) | 0;
+      },
+      "i32u-div": function(x, y) {
+        return ((x >>> 0) / (y >>> 0)) >>> 0;
+      },
+      "i32s-rem": function(x, y) {
+        return ((x | 0) % (y | 0)) | 0;
+      },
+      "i32u-rem": function(x, y) {
+        return ((x >>> 0) % (y >>> 0)) >>> 0;
+      }
+#endif // NEED_ALL_ASM2WASM_IMPORTS
+    },
     'parent': Module // Module inside wasm-js.cpp refers to wasm-js.cpp; this allows access to the outside program.
   };
 
   var exports = null;
 
+#if BINARYEN_METHOD != 'native-wasm'
   function lookupImport(mod, base) {
     var lookup = info;
     if (mod.indexOf('.') < 0) {
@@ -2141,6 +2078,7 @@ function integrateWasmJS() {
     }
     return lookup;
   }
+#endif // BINARYEN_METHOD != 'native-wasm'
 
   function mergeMemory(newBuffer) {
     // The wasm instance creates its memory. But static init code might have written to
@@ -2154,26 +2092,20 @@ function integrateWasmJS() {
     var oldView = new Int8Array(oldBuffer);
     var newView = new Int8Array(newBuffer);
 
+#if MEM_INIT_IN_WASM == 0
     // If we have a mem init file, do not trample it
     if (!memoryInitializer) {
       oldView.set(newView.subarray(Module['STATIC_BASE'], Module['STATIC_BASE'] + Module['STATIC_BUMP']), Module['STATIC_BASE']);
     }
+#endif
 
     newView.set(oldView);
     updateGlobalBuffer(newBuffer);
     updateGlobalBufferViews();
   }
 
-  var WasmTypes = {
-    none: 0,
-    i32: 1,
-    i64: 2,
-    f32: 3,
-    f64: 4
-  };
-
   function fixImports(imports) {
-    if (!{{{ WASM_BACKEND }}}) return imports;
+#if WASM_BACKEND
     var ret = {};
     for (var i in imports) {
       var fixed = i;
@@ -2181,6 +2113,9 @@ function integrateWasmJS() {
       ret[fixed] = imports[i];
     }
     return ret;
+#else
+    return imports;
+#endif // WASM_BACKEND
   }
 
   function getBinary() {
@@ -2226,6 +2161,7 @@ function integrateWasmJS() {
 
   // do-method functions
 
+#if BINARYEN_METHOD != 'native-wasm'
   function doJustAsm(global, env, providedBuffer) {
     // if no Module.asm, or it's the method handler helper (see below), then apply
     // the asmjs
@@ -2243,6 +2179,7 @@ function integrateWasmJS() {
     }
     return Module['asm'](global, env, providedBuffer);
   }
+#endif // BINARYEN_METHOD != 'native-wasm'
 
   function doNativeWasm(global, env, providedBuffer) {
     if (typeof WebAssembly !== 'object') {
@@ -2260,19 +2197,31 @@ function integrateWasmJS() {
       'NaN': NaN,
       'Infinity': Infinity
     };
-    info['global.Math'] = global.Math;
+    info['global.Math'] = Math;
     info['env'] = env;
     // handle a generated wasm instance, receiving its exports and
     // performing other necessary setup
-    function receiveInstance(instance) {
+    function receiveInstance(instance, module) {
       exports = instance.exports;
       if (exports.memory) mergeMemory(exports.memory);
       Module['asm'] = exports;
       Module["usingWasm"] = true;
+#if USE_PTHREADS
+      // Keep a reference to the compiled module so we can post it to the workers.
+      Module['wasmModule'] = module;
+      // Instantiation is synchronous in pthreads and we assert on run dependencies.
+      if(!ENVIRONMENT_IS_PTHREAD) removeRunDependency('wasm-instantiate');
+#else
       removeRunDependency('wasm-instantiate');
+#endif
     }
-
-    addRunDependency('wasm-instantiate'); // we can't run yet
+#if USE_PTHREADS
+    if (!ENVIRONMENT_IS_PTHREAD) {
+      addRunDependency('wasm-instantiate'); // we can't run yet (except in a pthread, where we have a custom sync instantiator)
+    }
+#else
+    addRunDependency('wasm-instantiate');
+#endif
 
     // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
     // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
@@ -2303,7 +2252,7 @@ function integrateWasmJS() {
       assert(Module === trueModule, 'the Module object should not be replaced during async compilation - perhaps the order of HTML elements is wrong?');
       trueModule = null;
 #endif
-      receiveInstance(output['instance']);
+      receiveInstance(output['instance'], output['module']);
     }
     function instantiateArrayBuffer(receiver) {
       getBinaryPromise().then(function(binary) {
@@ -2314,7 +2263,10 @@ function integrateWasmJS() {
       });
     }
     // Prefer streaming instantiation if available.
-    if (!Module['wasmBinary'] && typeof WebAssembly.instantiateStreaming === 'function' && wasmBinaryFile.indexOf('data:') !== 0) {
+    if (!Module['wasmBinary'] &&
+        typeof WebAssembly.instantiateStreaming === 'function' &&
+        !isDataURI(wasmBinaryFile) &&
+        typeof fetch === 'function') {
       WebAssembly.instantiateStreaming(fetch(wasmBinaryFile, { credentials: 'same-origin' }), info)
         .then(receiveInstantiatedSource)
         .catch(function(reason) {
@@ -2344,6 +2296,7 @@ function integrateWasmJS() {
 #endif
   }
 
+#if BINARYEN_METHOD != 'native-wasm'
   function doWasmPolyfill(global, env, providedBuffer, method) {
     if (typeof WasmJS !== 'function') {
       Module['printErr']('WasmJS not detected - polyfill not bundled?');
@@ -2409,6 +2362,7 @@ function integrateWasmJS() {
 
     return exports;
   }
+#endif // BINARYEN_METHOD != 'native-wasm'
 
   // We may have a preloaded value in Module.asm, save it
   Module['asmPreload'] = Module['asm'];
@@ -2438,12 +2392,15 @@ function integrateWasmJS() {
 #endif
         return null;
       }
-    } else {
+    }
+#if BINARYEN_METHOD != 'native-wasm'
+    else {
       // wasm interpreter support
       exports['__growWasmMemory']((size - oldSize) / wasmPageSize); // tiny wasm method that just does grow_memory
       // in interpreter, we replace Module.buffer if we allocate
       return Module['buffer'] !== old ? Module['buffer'] : null; // if it was reallocated, it changed
     }
+#endif // BINARYEN_METHOD != 'native-wasm'
   };
 
   Module['reallocBuffer'] = function(size) {
@@ -2462,7 +2419,9 @@ function integrateWasmJS() {
   // doesn't need to care that it is wasm or olyfilled wasm or asm.js.
 
   Module['asm'] = function(global, env, providedBuffer) {
+#if BINARYEN_METHOD != 'native-wasm'
     global = fixImports(global);
+#endif
     env = fixImports(env);
 
     // import table

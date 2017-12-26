@@ -56,10 +56,9 @@ LibraryManager.library = {
   // ==========================================================================
 
   utime__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
+  utime__proxy: 'sync',
+  utime__sig: 'iii',
   utime: function(path, times) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_2({{{ cDefine('EM_PROXIED_UTIME') }}}, path, times);
-#endif
     // int utime(const char *path, const struct utimbuf *times);
     // http://pubs.opengroup.org/onlinepubs/009695399/basedefs/utime.h.html
     var time;
@@ -82,10 +81,9 @@ LibraryManager.library = {
   },
 
   utimes__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
+  utimes__proxy: 'sync',
+  utimes__sig: 'iii',
   utimes: function(path, times) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_2({{{ cDefine('EM_PROXIED_UTIMES') }}}, path, times);
-#endif
     var time;
     if (times) {
       var offset = {{{ C_STRUCTS.timeval.__size__ }}} + {{{ C_STRUCTS.timeval.tv_sec }}};
@@ -116,10 +114,9 @@ LibraryManager.library = {
   },
 
   chroot__deps: ['__setErrNo', '$ERRNO_CODES'],
+  chroot__proxy: 'sync',
+  chroot__sig: 'ii',
   chroot: function(path) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_1({{{ cDefine('EM_PROXIED_CHROOT') }}}, path);
-#endif
     // int chroot(const char *path);
     // http://pubs.opengroup.org/onlinepubs/7908799/xsh/chroot.html
     ___setErrNo(ERRNO_CODES.EACCES);
@@ -127,10 +124,9 @@ LibraryManager.library = {
   },
 
   fpathconf__deps: ['__setErrNo', '$ERRNO_CODES'],
+  fpathconf__proxy: 'sync',
+  fpathconf__sig: 'iii',
   fpathconf: function(fildes, name) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_2({{{ cDefine('EM_PROXIED_FPATHCONF') }}}, fildes, name);
-#endif
     // long fpathconf(int fildes, int name);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/encrypt.html
     // NOTE: The first parameter is ignored, so pathconf == fpathconf.
@@ -171,10 +167,9 @@ LibraryManager.library = {
   pathconf: 'fpathconf',
 
   confstr__deps: ['__setErrNo', '$ERRNO_CODES', '$ENV'],
+  confstr__proxy: 'sync',
+  confstr__sig: 'iiii',
   confstr: function(name, buf, len) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_3({{{ cDefine('EM_PROXIED_CONFSTR') }}}, name, buf, len);
-#endif
     // size_t confstr(int name, char *buf, size_t len);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/confstr.html
     var value;
@@ -281,10 +276,9 @@ LibraryManager.library = {
   },
 
   sysconf__deps: ['__setErrNo', '$ERRNO_CODES'],
+  sysconf__proxy: 'sync',
+  sysconf__sig: 'ii',
   sysconf: function(name) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_1({{{ cDefine('EM_PROXIED_SYSCONF') }}}, name);
-#endif
     // long sysconf(int name);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/sysconf.html
     switch(name) {
@@ -295,8 +289,8 @@ LibraryManager.library = {
 #else
         var maxHeapSize = 2*1024*1024*1024 - 16777216;
 #endif
-#if BINARYEN_MEM_MAX != -1
-        maxHeapSize = {{{ BINARYEN_MEM_MAX }}};
+#if WASM_MEM_MAX != -1
+        maxHeapSize = {{{ WASM_MEM_MAX }}};
 #endif
 #if !ALLOW_MEMORY_GROWTH
         maxHeapSize = HEAPU8.length;
@@ -571,14 +565,14 @@ LibraryManager.library = {
      * not an issue.
      */
 #if ASSERTIONS == 2
-    Runtime.warnOnce('using stub malloc (reference it from C to have the real one included)');
+    warnOnce('using stub malloc (reference it from C to have the real one included)');
 #endif
-    var ptr = Runtime.dynamicAlloc(bytes + 8);
+    var ptr = dynamicAlloc(bytes + 8);
     return (ptr+8) & 0xFFFFFFF8;
   },
   free: function() {
 #if ASSERTIONS == 2
-    Runtime.warnOnce('using stub free (reference it from C to have the real one included)');
+    warnOnce('using stub free (reference it from C to have the real one included)');
 #endif
 },
 
@@ -599,9 +593,13 @@ LibraryManager.library = {
     _exit(-1234);
   },
 
+  atexit__proxy: 'sync',
+  atexit__sig: 'ii',
   atexit: function(func, arg) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_2({{{ cDefine('EM_PROXIED_ATEXIT') }}}, func, arg);
+#if ASSERTIONS
+#if NO_EXIT_RUNTIME == 1
+    warnOnce('atexit() called, but NO_EXIT_RUNTIME is set, so atexits() will not be called. set NO_EXIT_RUNTIME to 0 (see the FAQ)');
+#endif
 #endif
     __ATEXIT__.unshift({ func: func, arg: arg });
   },
@@ -639,11 +637,11 @@ LibraryManager.library = {
       ENV['PATH'] = '/';
       ENV['PWD'] = '/';
       ENV['HOME'] = '/home/web_user';
-      ENV['LANG'] = 'C';
+      ENV['LANG'] = 'C.UTF-8';
       ENV['_'] = Module['thisProgram'];
       // Allocate memory.
       poolPtr = allocate(TOTAL_ENV_SIZE, 'i8', ALLOC_STATIC);
-      envPtr = allocate(MAX_ENV_VALUES * {{{ Runtime.QUANTUM_SIZE }}},
+      envPtr = allocate(MAX_ENV_VALUES * {{{ Runtime.POINTER_SIZE }}},
                         'i8*', ALLOC_STATIC);
       {{{ makeSetValue('envPtr', '0', 'poolPtr', 'i8*') }}};
       {{{ makeSetValue(makeGlobalUse('_environ'), 0, 'envPtr', 'i8*') }}};
@@ -684,10 +682,9 @@ LibraryManager.library = {
 #endif
   $ENV: {},
   getenv__deps: ['$ENV'],
+  getenv__proxy: 'sync',
+  getenv__sig: 'ii',
   getenv: function(name) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_1({{{ cDefine('EM_PROXIED_GETENV') }}}, name);
-#endif
     // char *getenv(const char *name);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/getenv.html
     if (name === 0) return 0;
@@ -699,10 +696,9 @@ LibraryManager.library = {
     return _getenv.ret;
   },
   clearenv__deps: ['$ENV', '__buildEnvironment'],
-  clearenv: function(name) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_1({{{ cDefine('EM_PROXIED_CLEARENV') }}}, name);
-#endif
+  clearenv__proxy: 'sync',
+  clearenv__sig: 'i',
+  clearenv: function() {
     // int clearenv (void);
     // http://www.gnu.org/s/hello/manual/libc/Environment-Access.html#index-clearenv-3107
     ENV = {};
@@ -710,10 +706,9 @@ LibraryManager.library = {
     return 0;
   },
   setenv__deps: ['$ENV', '__buildEnvironment', '$ERRNO_CODES', '__setErrNo'],
+  setenv__proxy: 'sync',
+  setenv__sig: 'iiii',
   setenv: function(envname, envval, overwrite) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_3({{{ cDefine('EM_PROXIED_SETENV') }}}, envname, envval, overwrite);
-#endif
     // int setenv(const char *envname, const char *envval, int overwrite);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/setenv.html
     if (envname === 0) {
@@ -732,10 +727,9 @@ LibraryManager.library = {
     return 0;
   },
   unsetenv__deps: ['$ENV', '__buildEnvironment', '$ERRNO_CODES', '__setErrNo'],
+  unsetenv__proxy: 'sync',
+  unsetenv__sig: 'ii',
   unsetenv: function(name) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_1({{{ cDefine('EM_PROXIED_UNSETENV') }}}, name);
-#endif
     // int unsetenv(const char *name);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/unsetenv.html
     if (name === 0) {
@@ -754,10 +748,9 @@ LibraryManager.library = {
     return 0;
   },
   putenv__deps: ['$ENV', '__buildEnvironment', '$ERRNO_CODES', '__setErrNo'],
+  putenv__proxy: 'sync',
+  putenv__sig: 'ii',
   putenv: function(string) {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_1({{{ cDefine('EM_PROXIED_PUTENV') }}}, string);
-#endif
     // int putenv(char *string);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/putenv.html
     // WARNING: According to the standard (and the glibc implementation), the
@@ -1439,14 +1432,14 @@ LibraryManager.library = {
     if (!self.LLVM_SAVEDSTACKS) {
       self.LLVM_SAVEDSTACKS = [];
     }
-    self.LLVM_SAVEDSTACKS.push(Runtime.stackSave());
+    self.LLVM_SAVEDSTACKS.push(stackSave());
     return self.LLVM_SAVEDSTACKS.length-1;
   },
   llvm_stackrestore: function(p) {
     var self = _llvm_stacksave;
     var ret = self.LLVM_SAVEDSTACKS[p];
     self.LLVM_SAVEDSTACKS.splice(p, 1);
-    Runtime.stackRestore(ret);
+    stackRestore(ret);
   },
 
   __cxa_pure_virtual: function() {
@@ -1653,6 +1646,8 @@ LibraryManager.library = {
   },
   // void* dlopen(const char* filename, int flag);
   dlopen__deps: ['$DLFCN', '$FS', '$ENV'],
+  dlopen__proxy: 'sync',
+  dlopen__sig: 'iii',
   dlopen: function(filename, flag) {
 #if MAIN_MODULE == 0
     abort("To use dlopen, you need to use Emscripten's linking support, see https://github.com/kripken/emscripten/wiki/Linking");
@@ -1712,12 +1707,12 @@ LibraryManager.library = {
         var lib_data = FS.readFile(filename, { encoding: 'binary' });
         if (!(lib_data instanceof Uint8Array)) lib_data = new Uint8Array(lib_data);
         //Module.printErr('libfile ' + filename + ' size: ' + lib_data.length);
-        lib_module = Runtime.loadWebAssemblyModule(lib_data);
+        lib_module = loadWebAssemblyModule(lib_data);
 #else
         // the shared library is a JS file, which we eval
         var lib_data = FS.readFile(filename, { encoding: 'utf8' });
         lib_module = eval(lib_data)(
-          Runtime.alignFunctionTables(),
+          alignFunctionTables(),
           Module
         );
 #endif
@@ -1773,6 +1768,8 @@ LibraryManager.library = {
   },
   // int dlclose(void* handle);
   dlclose__deps: ['$DLFCN'],
+  dlclose__proxy: 'sync',
+  dlclose__sig: 'ii',
   dlclose: function(handle) {
     // int dlclose(void *handle);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlclose.html
@@ -1793,6 +1790,8 @@ LibraryManager.library = {
   },
   // void* dlsym(void* handle, const char* symbol);
   dlsym__deps: ['$DLFCN'],
+  dlsym__proxy: 'sync',
+  dlsym__sig: 'iii',
   dlsym: function(handle, symbol) {
     // void *dlsym(void *restrict handle, const char *restrict name);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlsym.html
@@ -1814,7 +1813,7 @@ LibraryManager.library = {
       } else {
         var result = lib.module[symbol];
         if (typeof result == 'function') {
-          result = Runtime.addFunction(result);
+          result = addFunction(result);
           //Module.printErr('adding function dlsym result for ' + symbol + ' => ' + result);
           lib.cached_functions = result;
         }
@@ -1824,6 +1823,8 @@ LibraryManager.library = {
   },
   // char* dlerror(void);
   dlerror__deps: ['$DLFCN'],
+  dlerror__proxy: 'sync',
+  dlerror__sig: 'i',
   dlerror: function() {
     // char *dlerror(void);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlerror.html
@@ -1838,6 +1839,8 @@ LibraryManager.library = {
     }
   },
 
+  dladdr__proxy: 'sync',
+  dladdr__sig: 'iii',
   dladdr: function(addr, info) {
     // report all function pointers as coming from this program itself XXX not really correct in any way
     var fname = allocate(intArrayFromString(Module['thisProgram'] || './this.program'), 'i8', ALLOC_NORMAL); // XXX leak
@@ -2002,7 +2005,7 @@ LibraryManager.library = {
     var dst = (summerOffset != winterOffset && date.getTimezoneOffset() == Math.min(winterOffset, summerOffset))|0;
     {{{ makeSetValue('tmPtr', C_STRUCTS.tm.tm_isdst, 'dst', 'i32') }}};
 
-    var zonePtr = {{{ makeGetValue(makeGlobalUse('_tzname'), 'dst ? Runtime.QUANTUM_SIZE : 0', 'i32') }}};
+    var zonePtr = {{{ makeGetValue(makeGlobalUse('_tzname'), 'dst ? ' + Runtime.QUANTUM_SIZE + ' : 0', 'i32') }}};
     {{{ makeSetValue('tmPtr', C_STRUCTS.tm.tm_zone, 'zonePtr', 'i32') }}};
 
     return tmPtr;
@@ -2049,9 +2052,9 @@ LibraryManager.library = {
 
   ctime_r__deps: ['localtime_r', 'asctime_r'],
   ctime_r: function(time, buf) {
-    var stack = Runtime.stackSave();
-    var rv = _asctime_r(_localtime_r(time, Runtime.stackAlloc({{{ C_STRUCTS.tm.__size__ }}})), buf);
-    Runtime.stackRestore(stack);
+    var stack = stackSave();
+    var rv = _asctime_r(_localtime_r(time, stackAlloc({{{ C_STRUCTS.tm.__size__ }}})), buf);
+    stackRestore(stack);
     return rv;
   },
 
@@ -2072,10 +2075,9 @@ LibraryManager.library = {
   timezone: '{{{ makeStaticAlloc(1) }}}',
 #endif
   tzset__deps: ['tzname', 'daylight', 'timezone'],
+  tzset__proxy: 'sync',
+  tzset__sig: 'v',
   tzset: function() {
-#if USE_PTHREADS
-    if (ENVIRONMENT_IS_PTHREAD) return _emscripten_sync_run_in_main_thread_0({{{ cDefine('EM_PROXIED_TZSET') }}});
-#endif
     // TODO: Use (malleable) environment variables instead of system settings.
     if (_tzset.called) return;
     _tzset.called = true;
@@ -3508,6 +3510,8 @@ LibraryManager.library = {
 
   // note: lots of leaking here!
   gethostbyaddr__deps: ['$DNS', 'gethostbyname', '_inet_ntop4_raw'],
+  gethostbyaddr__proxy: 'sync',
+  gethostbyaddr__sig: 'iiii',
   gethostbyaddr: function (addr, addrlen, type) {
     if (type !== {{{ cDefine('AF_INET') }}}) {
       ___setErrNo(ERRNO_CODES.EAFNOSUPPORT);
@@ -3525,6 +3529,8 @@ LibraryManager.library = {
   },
 
   gethostbyname__deps: ['$DNS', '_inet_pton4_raw'],
+  gethostbyname__proxy: 'sync',
+  gethostbyname__sig: 'ii',
   gethostbyname: function(name) {
     name = Pointer_stringify(name);
 
@@ -3548,6 +3554,8 @@ LibraryManager.library = {
   },
 
   gethostbyname_r__deps: ['gethostbyname'],
+  gethostbyname_r__proxy: 'sync',
+  gethostbyname_r__sig: 'iiiiiii',
   gethostbyname_r: function(name, ret, buf, buflen, out, err) {
     var data = _gethostbyname(name);
     _memcpy(ret, data, {{{ C_STRUCTS.hostent.__size__ }}});
@@ -3558,6 +3566,8 @@ LibraryManager.library = {
   },
 
   getaddrinfo__deps: ['$Sockets', '$DNS', '_inet_pton4_raw', '_inet_ntop4_raw', '_inet_pton6_raw', '_inet_ntop6_raw', '_write_sockaddr'],
+  getaddrinfo__proxy: 'sync',
+  getaddrinfo__sig: 'iiiii',
   getaddrinfo: function(node, service, hint, out) {
     // Note getaddrinfo currently only returns a single addrinfo with ai_next defaulting to NULL. When NULL
     // hints are specified or ai_family set to AF_UNSPEC or ai_socktype or ai_protocol set to 0 then we
@@ -4006,7 +4016,7 @@ LibraryManager.library = {
     var funcname = args.callee.name;
     var str = '(';
     var first = true;
-    for(i in args) {
+    for (var i in args) {
       var a = args[i];
       if (!first) {
         str += ", ";
@@ -4038,7 +4048,7 @@ LibraryManager.library = {
 
     // If user requested to see the original source stack, but no source map information is available, just fall back to showing the JS stack.
     if (flags & 8/*EM_LOG_C_STACK*/ && typeof emscripten_source_map === 'undefined') {
-      Runtime.warnOnce('Source map information is not available, emscripten_log with EM_LOG_C_STACK will be ignored. Build with "--pre-js $EMSCRIPTEN/src/emscripten-source-map.min.js" linker flag to add source map loading to code.');
+      warnOnce('Source map information is not available, emscripten_log with EM_LOG_C_STACK will be ignored. Build with "--pre-js $EMSCRIPTEN/src/emscripten-source-map.min.js" linker flag to add source map loading to code.');
       flags ^= 8/*EM_LOG_C_STACK*/;
       flags |= 16/*EM_LOG_JS_STACK*/;
     }
@@ -4046,19 +4056,19 @@ LibraryManager.library = {
     var stack_args = null;
     if (flags & 128 /*EM_LOG_FUNC_PARAMS*/) {
       // To get the actual parameters to the functions, traverse the stack via the unfortunately deprecated 'arguments.callee' method, if it works:
-      var stack_args = __emscripten_traverse_stack(arguments);
+      stack_args = __emscripten_traverse_stack(arguments);
       while (stack_args[1].indexOf('_emscripten_') >= 0)
         stack_args = __emscripten_traverse_stack(stack_args[0]);
     }
     
     // Process all lines:
-    lines = callstack.split('\n');
+    var lines = callstack.split('\n');
     callstack = '';
     var newFirefoxRe = new RegExp('\\s*(.*?)@(.*?):([0-9]+):([0-9]+)'); // New FF30 with column info: extract components of form '       Object._main@http://server.com:4324:12'
     var firefoxRe = new RegExp('\\s*(.*?)@(.*):(.*)(:(.*))?'); // Old FF without column info: extract components of form '       Object._main@http://server.com:4324'
     var chromeRe = new RegExp('\\s*at (.*?) \\\((.*):(.*):(.*)\\\)'); // Extract components of form '    at Object._main (http://server.com/file.html:4324:12)'
     
-    for(l in lines) {
+    for (var l in lines) {
       var line = lines[l];
 
       var jsSymbolName = '';
@@ -4166,7 +4176,7 @@ LibraryManager.library = {
   emscripten_log: function(flags, varargs) {
     // Extract the (optionally-existing) printf format specifier field from varargs.
     var format = {{{ makeGetValue('varargs', '0', 'i32', undefined, undefined, true) }}};
-    varargs += Math.max(Runtime.getNativeFieldSize('i32'), Runtime.getAlignSize('i32', null, true));
+    varargs += {{{ Math.max(Runtime.getNativeFieldSize('i32'), Runtime.getAlignSize('i32', null, true)) }}};
     var str = '';
     if (format) {
       var result = __formatString(format, varargs);
@@ -4180,7 +4190,7 @@ LibraryManager.library = {
   emscripten_get_compiler_setting: function(name) {
     name = Pointer_stringify(name);
 
-    var ret = Runtime.getCompilerSetting(name);
+    var ret = getCompilerSetting(name);
     if (typeof ret === 'number') return ret;
 
     if (!_emscripten_get_compiler_setting.cache) _emscripten_get_compiler_setting.cache = {};
@@ -4367,6 +4377,9 @@ LibraryManager.library = {
   emscripten_asm_const: true,
   emscripten_asm_const_int: true,
   emscripten_asm_const_double: true,
+  emscripten_asm_const_int_sync_on_main_thread: true,
+  emscripten_asm_const_double_sync_on_main_thread: true,
+  emscripten_asm_const_async_on_main_thread: true,
 
   // ======== compiled code from system/lib/compiler-rt , see readme therein
   __muldsi3__asm: true,

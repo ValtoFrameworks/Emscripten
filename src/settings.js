@@ -44,8 +44,12 @@ var VERBOSE = 0; // When set to 1, will generate more verbose output during comp
 var INVOKE_RUN = 1; // Whether we will run the main() function. Disable if you embed the generated
                     // code in your own, and will call main() yourself at the right time (which you
                     // can do with Module.callMain(), with an optional parameter of commandline args).
-var NO_EXIT_RUNTIME = 0; // If set, the runtime is not quit when main() completes (allowing code to
-                         // run afterwards, for example from the browser main event loop).
+var NO_EXIT_RUNTIME = 1; // If 1, the runtime is not quit when main() completes (allowing code to
+                         // run afterwards, for example from the browser main event loop). atexit()s
+                         // are also not executed, and we can avoid including code for runtime shutdown,
+                         // like flushing the stdio streams.
+                         // Set this to 0 if you do want atexit()s or stdio streams to be flushed
+                         // on exit.
 var MEM_INIT_METHOD = 0; // How to represent the initial memory content.
                          // 0: embed a base64 string literal representing the initial memory data
                          // 1: create a *.mem file containing the binary data of the initial memory;
@@ -246,6 +250,7 @@ var SOCKET_WEBRTC = 0; // Select socket backend, either webrtc or websockets. XX
 // settings may configured at run time via the Module object e.g.
 // Module['websocket'] = {subprotocol: 'base64, binary, text'};
 // Module['websocket'] = {url: 'wss://', subprotocol: 'base64'};
+// You can set 'subprotocol' to null, if you don't want to specify it
 // Run time configuration may be useful as it lets an application select multiple different services.
 var WEBSOCKET_URL = 'ws://'; // A string containing either a WebSocket URL prefix (ws:// or wss://) or a complete
                              // RFC 6455 URL - "ws[s]:" "//" host [ ":" port ] path [ "?" query ].
@@ -285,6 +290,9 @@ var STB_IMAGE = 0; // Enables building of stb-image, a tiny public-domain librar
                    // can be done synchronously, however, it will not be as fast as the browser itself.
                    // When enabled, stb-image will be used automatically from IMG_Load and IMG_Load_RW. You
                    // can also call the stbi_* functions directly yourself.
+
+var LEGACY_VM_SUPPORT = 0; // Enable this to get support for non-modern browsers, node.js, etc. This adds:
+                           //  * Polyfilling for Math.clz32, Math.trunc, Math.imul, Math.fround
 
 var LZ4 = 0; // Enable this to support lz4-compressed file packages. They are stored compressed in memory, and
              // decompressed on the fly, avoiding storing the entire decompressed data in memory at once.
@@ -334,55 +342,16 @@ var ASYNCIFY_WHITELIST = ['qsort',   // Functions in this list are never conside
                           '__fwritex',
                           'MUSL_vfprintf'];
 
-var EXPORTED_RUNTIME_METHODS = [ // Runtime elements that are exported on Module. By default we export quite a bit, you can reduce this list to lower your code size,
-                                 // especially when closure is run (exporting prevents closure from eliminating code)
+var EXPORTED_RUNTIME_METHODS = [ // Runtime elements that are exported on Module by default. We used to export quite a lot here,
+                                 // but have removed them all, so this option is redundant given that EXTRA_EXPORTED_RUNTIME_METHODS
+                                 // exists, and so this option exists only for backwards compatibility. You should use
+                                 // EXTRA_EXPORTED_RUNTIME_METHODS for things you want to export from the runtime.
                                  // Note that methods on this list are only exported if they are included (either automatically from linking, or due to being
                                  // in DEFAULT_LIBRARY_FUNCS_TO_INCLUDE)
                                  // Note that the name may be slightly misleading, as this
                                  // is for any JS library element, and not just
                                  // methods. For example, we export the Runtime object
                                  // by having "Runtime" in this list.
-  'FS_createFolder',
-  'FS_createPath',
-  'FS_createDataFile',
-  'FS_createPreloadedFile',
-  'FS_createLazyFile',
-  'FS_createLink',
-  'FS_createDevice',
-  'FS_unlink',
-  'Runtime',
-  'ccall',
-  'cwrap',
-  'setValue',
-  'getValue',
-  'ALLOC_NORMAL',
-  'ALLOC_STACK',
-  'ALLOC_STATIC',
-  'ALLOC_DYNAMIC',
-  'ALLOC_NONE',
-  'allocate',
-  'getMemory',
-  'Pointer_stringify',
-  'AsciiToString',
-  'stringToAscii',
-  'UTF8ArrayToString',
-  'UTF8ToString',
-  'stringToUTF8Array',
-  'stringToUTF8',
-  'lengthBytesUTF8',
-  'stackTrace',
-  'addOnPreRun',
-  'addOnInit',
-  'addOnPreMain',
-  'addOnExit',
-  'addOnPostRun',
-  'intArrayFromString',
-  'intArrayToString',
-  'writeStringToMemory',
-  'writeArrayToMemory',
-  'writeAsciiToMemory',
-  'addRunDependency',
-  'removeRunDependency',
 ];
 
 var EXTRA_EXPORTED_RUNTIME_METHODS = []; // Additional methods to those in EXPORTED_RUNTIME_METHODS. Adjusting that list
@@ -422,7 +391,7 @@ var EXPORTED_FUNCTIONS = ['_main'];
 var EXPORT_ALL = 0; // If true, we export all the symbols. Note that this does *not* affect LLVM, so it can
                     // still eliminate functions as dead. This just exports them on the Module object.
 var EXPORT_BINDINGS = 0; // Export all bindings generator functions (prefixed with emscripten_bind_). This
-                         // is necessary to use the WebIDL binder or bindings generator with asm.js
+                         // is necessary to use the WebIDL binder with asm.js
 var EXPORT_FUNCTION_TABLES = 0; // If true, export all the functions appearing in a function table, and the
                                 // tables themselves.
 var RETAIN_COMPILER_SETTINGS = 0; // Remembers the values of these settings, and makes them accessible
@@ -718,9 +687,10 @@ var BINARYEN_TRAP_MODE = "allow"; // How we handle wasm operations that may trap
 var BINARYEN_PASSES = ""; // A comma-separated list of passes to run in the binaryen optimizer,
                           // for example, "dce,precompute,vacuum".
                           // When set, this overrides the default passes we would normally run.
-var BINARYEN_MEM_MAX = -1; // Set the maximum size of memory in the wasm module (in bytes).
-                           // Without this, TOTAL_MEMORY is used (as it is used for the initial value),
-                           // or if memory growth is enabled, no limit is set. This overrides both of those.
+var WASM_MEM_MAX = -1; // Set the maximum size of memory in the wasm module (in bytes).
+                       // Without this, TOTAL_MEMORY is used (as it is used for the initial value),
+                       // or if memory growth is enabled, no limit is set. This overrides both of those.
+                       // (This option was formerly called BINARYEN_MEM_MAX)
 var BINARYEN_ASYNC_COMPILATION = 1; // Whether to compile the wasm asynchronously, which is more
                                     // efficient and does not block the main thread. This is currently
                                     // required for all but the smallest modules to run in V8
@@ -793,6 +763,8 @@ var PTHREAD_POOL_SIZE = 0; // Specifies the number of web workers that are preal
 var PTHREAD_HINT_NUM_CORES = 4;
 
 var PTHREADS_PROFILING = 0; // True when building with --threadprofiler
+
+var PTHREADS_DEBUG = 0; // If true, add in debug traces for diagnosing pthreads related issues.
 
 var MAX_GLOBAL_ALIGN = -1; // received from the backend
 
@@ -877,6 +849,8 @@ var WASM_TEXT_FILE = ''; // name of the file containing wasm text, if relevant
 var WASM_BINARY_FILE = ''; // name of the file containing wasm binary, if relevant
 var ASMJS_CODE_FILE = ''; // name of the file containing asm.js, if relevant
 var SOURCE_MAP_BASE = ''; // Base URL the source mapfile, if relevant
+
+var MEM_INIT_IN_WASM = 0; // for internal use only
 
 var SUPPORT_BASE64_EMBEDDING = 0; // If set to 1, src/base64Utils.js will be included in the bundle.
                                   // This is set internally when needed (SINGLE_FILE)

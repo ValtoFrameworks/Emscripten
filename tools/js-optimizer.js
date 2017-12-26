@@ -188,12 +188,43 @@ function srcToExp(src) {
 // Traverses the children of a node. If the traverse function returns an object,
 // replaces the child. If it returns true, stop the traversal and return true.
 function traverseChildren(node, traverse, pre, post) {
-  for (var i = 0; i < node.length; i++) {
-    var subnode = node[i];
-    if (Array.isArray(subnode)) {
-      var subresult = traverse(subnode, pre, post);
-      if (subresult === true) return true;
-      if (subresult !== null && typeof subresult === 'object') node[i] = subresult;
+  if (node[0] === 'var') {
+    // don't traverse the names, just the values
+    var children = node[1];
+    if (!Array.isArray(children)) return;
+    for (var i = 0; i < children.length; i++) {
+      var subnode = children[i];
+      if (subnode.length === 2) {
+        var value = subnode[1];
+        if (Array.isArray(value)) {
+          var subresult = traverse(value, pre, post);
+          if (subresult === true) return true;
+          if (subresult !== null && typeof subresult === 'object') subnode[1] = subresult;
+        }
+      }
+    }
+  } else if (node[0] === 'object') {
+    // don't traverse the names, just the values
+    var children = node[1];
+    if (!Array.isArray(children)) return;
+    for (var i = 0; i < children.length; i++) {
+      var subnode = children[i];
+      var value = subnode[1];
+      if (Array.isArray(value)) {
+        var subresult = traverse(value, pre, post);
+        if (subresult === true) return true;
+        if (subresult !== null && typeof subresult === 'object') subnode[1] = subresult;
+      }
+    }
+  } else {
+    // generic traversal
+    for (var i = 0; i < node.length; i++) {
+      var subnode = node[i];
+      if (Array.isArray(subnode)) {
+        var subresult = traverse(subnode, pre, post);
+        if (subresult === true) return true;
+        if (subresult !== null && typeof subresult === 'object') node[i] = subresult;
+      }
     }
   }
 }
@@ -1377,7 +1408,9 @@ function hasSideEffects(node) { // this is 99% incomplete!
       }
       return false;
     }
-    case 'conditional': return hasSideEffects(node[1]) || hasSideEffects(node[2]) || hasSideEffects(node[3]); 
+    case 'conditional': return hasSideEffects(node[1]) || hasSideEffects(node[2]) || hasSideEffects(node[3]);
+    case 'function': case 'defun': return false;
+    case 'object': return false;
     default: return true;
   }
 }
@@ -1398,7 +1431,7 @@ function triviallySafeToMove(node, asmData) {
         break;
       default:
         ok = false;
-    }  
+    }
   });
   return ok;
 }
@@ -2701,7 +2734,7 @@ function registerizeHarder(ast) {
         junctions[currEntryJunction].outblocks[nextBasicBlock.id] = 1;
         junctions[id].inblocks[nextBasicBlock.id] = 1;
         blocks.push(nextBasicBlock);
-      } 
+      }
       nextBasicBlock = { id: null, entry: null, exit: null, labels: {}, nodes: [], isexpr: [], use: {}, kill: {} };
       setJunction(id, force);
       return id;
@@ -2826,14 +2859,14 @@ function registerizeHarder(ast) {
       // It walks the tree in execution order, calling the above state-management
       // functions at appropriate points in the traversal.
       var type = node[0];
-  
+
       // Any code traversed without an active entry junction must be dead,
       // as the resulting block could never be entered. Let's remove it.
       if (currEntryJunction === null && junctions.length > 0) {
         morphNode(node, ['block', []]);
         return;
       }
- 
+
       // Traverse each node type according to its particular control-flow semantics.
       switch (type) {
         case 'defun':
@@ -3157,7 +3190,7 @@ function registerizeHarder(ast) {
             break FINDLABELLEDBLOCKS;
           }
           labelledJumps.push([finalNode[3][1], block]);
-        } else { 
+        } else {
           // If label is assigned a non-zero value elsewhere in the block
           // then all bets are off.  This can happen e.g. due to outlining
           // saving/restoring label to the stack.
@@ -3631,7 +3664,7 @@ function registerizeHarder(ast) {
 
     // That's it!
     // Re-construct the function with appropriate variable definitions.
- 
+
     var finalAsmData = {
       params: {},
       vars: {},
@@ -3861,7 +3894,7 @@ function eliminate(ast, memSafe) {
         } else if (type === 'call') {
           usesGlobals = true;
           usesMemory = true;
-          doesCall = true;        
+          doesCall = true;
           ignoreName = true;
         } else {
           ignoreName = false;
@@ -4372,7 +4405,7 @@ function eliminate(ast, memSafe) {
                   // they overlap, we can still proceed with the loop optimization, but we must introduce a
                   // loop temp helper variable
                   var temp = looper + '$looptemp';
-                  assert(!(temp in asmData.vars)); 
+                  assert(!(temp in asmData.vars));
                   for (var i = firstLooperUsage; i <= lastLooperUsage; i++) {
                     var curr = i < stats.length-1 ? stats[i] : last[1]; // on the last line, just look in the condition
                     traverse(curr, function looperToLooptemp(node, type) {
@@ -4703,7 +4736,12 @@ var FAST_ELIMINATION_BINARIES = setUnion(setUnion(USEFUL_BINARY_OPS, COMPARE_OPS
 
 function measureSize(ast) {
   var size = 0;
-  traverse(ast, function() {
+  traverse(ast, function(node, type) {
+    // FIXME backwards compatibility: measure var internal node too. this
+    //       affects the 'outline' test.
+    if (type === 'var') {
+      size += node[1].length;
+    }
     size++;
   });
   return size;
@@ -5730,12 +5768,13 @@ function safeHeap(ast) {
   traverseGeneratedFunctions(ast, function(func) {
     if (func[1] in SAFE_HEAP_FUNCS) return null;
     traverseGenerated(func, function(node, type) {
+      var heap, ptr;
       if (type === 'assign') {
         if (node[1] === true && node[2][0] === 'sub') {
-          var heap = node[2][1][1];
-          var ptr = fixPtr(node[2][2], heap);
+          heap = node[2][1][1];
+          ptr = fixPtr(node[2][2], heap);
           var value = node[3];
-          // SAFE_HEAP_STORE(ptr, value, bytes, isFloat) 
+          // SAFE_HEAP_STORE(ptr, value, bytes, isFloat)
           switch (heap) {
             case 'HEAP8':   case 'HEAPU8': {
               return ['call', ['name', 'SAFE_HEAP_STORE'], [ptr, makeAsmCoercion(value, ASM_INT), ['num', 1]]];
@@ -5759,9 +5798,9 @@ function safeHeap(ast) {
         var target = node[1][1];
         if (target[0] === 'H') {
           // heap access
-          var heap = target;
-          var ptr = fixPtr(node[2], heap);
-          // SAFE_HEAP_LOAD(ptr, bytes, isFloat) 
+          heap = target;
+          ptr = fixPtr(node[2], heap);
+          // SAFE_HEAP_LOAD(ptr, bytes, isFloat)
           switch (heap) {
             case 'HEAP8': {
               return makeAsmCoercion(['call', ['name', 'SAFE_HEAP_LOAD'], [ptr, ['num', 1], ['num', 0]]], ASM_INT);
@@ -5850,12 +5889,13 @@ function fixPtrSlim(ptr, heap, shell) {
 
 function splitMemory(ast, shell) {
   traverse(ast, function(node, type) {
+    var heap, ptr;
     if (type === 'assign') {
       if (node[2][0] === 'sub' && node[2][1][0] === 'name') {
-        var heap = node[2][1][1];
+        heap = node[2][1][1];
         if (parseHeap(heap)) {
           if (node[1] !== true) assert(0, 'bad assign, split memory cannot handle ' + JSON.stringify(node) + '= to a HEAP');
-          var ptr = fixPtrSlim(node[2][2], heap, shell);
+          ptr = fixPtrSlim(node[2][2], heap, shell);
           var value = node[3];
           switch (heap) {
             case 'HEAP8': return ['call', ['name', 'set8'], [ptr, value]];
@@ -5874,8 +5914,8 @@ function splitMemory(ast, shell) {
       var target = node[1][1];
       if (target[0] === 'H') {
         // heap access
-        var heap = target;
-        var ptr = fixPtrSlim(node[2], heap, shell);
+        heap = target;
+        ptr = fixPtrSlim(node[2], heap, shell);
         switch (heap) {
           case 'HEAP8': return ['call', ['name', 'get8'], [ptr]];
           case 'HEAP16': return ['call', ['name', 'get16'], [ptr]];
@@ -5993,8 +6033,6 @@ function ilog2(x) {
 
 // Converts functions into binary format to be run by an emterpreter
 function emterpretify(ast) {
-  emitAst = false;
-
   var EMTERPRETED_FUNCS = set(extraInfo.emterpretedFuncs);
   var EXTERNAL_EMTERPRETED_FUNCS = set(extraInfo.externalEmterpretedFuncs);
   var OPCODES = extraInfo.opcodes;
@@ -6362,7 +6400,7 @@ function emterpretify(ast) {
                   } else {
                     // we can't trample this reg
                     var l = getFree();
-                    ret[1].push(opcode, l, ret[0], 0);                   
+                    ret[1].push(opcode, l, ret[0], 0);
                     ret[0] = l;
                   }
                 } else {
@@ -6483,7 +6521,7 @@ function emterpretify(ast) {
         case 'conditional': {
           // TODO: handle dropIt
           var type = detectType(node[2], asmData);
-          if ((node[2][0] === 'name' || getNum(node[2]) !== null) && 
+          if ((node[2][0] === 'name' || getNum(node[2]) !== null) &&
               (node[3][0] === 'name' || getNum(node[3]) !== null)) {
             // this is a simple choice between concrete values, no need for control flow here
             var out = assignTo >= 0 ? assignTo : getFree();
@@ -6499,7 +6537,7 @@ function emterpretify(ast) {
           assert(type !== ASM_NONE);
           var ret = makeBranchIfFalse(node[1], otherwise);
           var first = getReg(node[2]);
-          ret = ret.concat(first[1]).concat(makeSet(temp, releaseIfFree(first[0]), type)); 
+          ret = ret.concat(first[1]).concat(makeSet(temp, releaseIfFree(first[0]), type));
           ret.push('BR', 0, exit, 0);
           var second = getReg(node[3]);
           ret.push('marker', otherwise, 0, 0);
@@ -7240,7 +7278,7 @@ function emterpretify(ast) {
           }
         }
       }
-      // remove relative and absolute placeholders, after which every instruction is now in its absolute location, and we can write out absolutes 
+      // remove relative and absolute placeholders, after which every instruction is now in its absolute location, and we can write out absolutes
       for (var i = 0; i < code.length; i += 4) {
         if (code[i] === 'marker') {
           var obj = code[i+1];
@@ -7360,7 +7398,7 @@ function emterpretify(ast) {
           var node = stats[i];
           if (node[0] == 'stat') node = node[1];
           if (node[0] !== 'var' && node[0] !== 'assign') {
-            stats.splice(i, 0, ['stat', 
+            stats.splice(i, 0, ['stat',
               ['conditional', ['name', 'asyncState'], makeAsmCoercion(['call', ['name', 'abort'], [['num', '-12']]], ASM_INT), ['num', 0]]
             ]);
             break;
@@ -7805,112 +7843,247 @@ function eliminateDeadGlobals(ast) {
 // Removes obviously-unused code. Similar to closure compiler in its rules -
 // export e.g. by Module['..'] = theThing; , or use it somewhere, otherwise
 // it goes away.
-function JSDCE(ast) {
-  var scopes = [{}]; // begin with empty toplevel scope
-  function DUMP() {
-    printErr('vvvvvvvvvvvvvv');
-    for (var i = 0; i < scopes.length; i++) {
-      printErr(i + ' : ' + JSON.stringify(scopes[i]));
+function JSDCE(ast, multipleIterations) {
+  function iteration() {
+    var removed = false;
+    var scopes = [{}]; // begin with empty toplevel scope
+    function DUMP() {
+      printErr('vvvvvvvvvvvvvv');
+      for (var i = 0; i < scopes.length; i++) {
+        printErr(i + ' : ' + JSON.stringify(scopes[i]));
+      }
+      printErr('^^^^^^^^^^^^^^');
     }
-    printErr('^^^^^^^^^^^^^^');
-  }
-  function ensureData(scope, name) {
-    if (Object.prototype.hasOwnProperty.call(scope, name)) return scope[name];
-    scope[name] = {
-      def: 0,
-      use: 0,
-      param: 0 // true for function params, which cannot be eliminated
-    };
-    return scope[name];
-  }
-  function cleanUp(ast, names) {
+    function ensureData(scope, name) {
+      if (Object.prototype.hasOwnProperty.call(scope, name)) return scope[name];
+      scope[name] = {
+        def: 0,
+        use: 0,
+        param: 0 // true for function params, which cannot be eliminated
+      };
+      return scope[name];
+    }
+    function cleanUp(ast, names) {
+      traverse(ast, function(node, type) {
+        if (type === 'defun' && Object.prototype.hasOwnProperty.call(names, node[1])) {
+          removed = true;
+          return emptyNode();
+        }
+        if (type === 'defun' || type === 'function') return null; // do not enter other scopes
+        if (type === 'var') {
+          node[1] = node[1].filter(function(varItem, j) {
+            var curr = varItem[0];
+            var value = varItem[1];
+            var keep = !(curr in names) || (value && hasSideEffects(value));
+            if (!keep) removed = true;
+            return keep;
+          });
+          if (node[1].length === 0) return emptyNode();
+        }
+      });
+      return ast;
+    }
     traverse(ast, function(node, type) {
-      if (type === 'defun' && Object.prototype.hasOwnProperty.call(names, node[1])) return emptyNode();
-      if (type === 'defun' || type === 'function') return null; // do not enter other scopes
       if (type === 'var') {
-        node[1] = node[1].filter(function(varItem, j) {
-          var curr = varItem[0];
-          var value = varItem[1];
-          return !(curr in names) || (value && hasSideEffects(value));
+        node[1].forEach(function(varItem, j) {
+          var name = varItem[0];
+          ensureData(scopes[scopes.length-1], name).def = 1;
         });
-        if (node[1].length === 0) return emptyNode();
+        return;
+      }
+      if (type === 'object') {
+        return;
+      }
+      if (type === 'defun' || type === 'function') {
+        // defun names matter - function names (the y in var x = function y() {..}) are just for stack traces.
+        if (type === 'defun') ensureData(scopes[scopes.length-1], node[1]).def = 1;
+        var scope = {};
+        node[2].forEach(function(param) {
+          ensureData(scope, param).def = 1;
+          scope[param].param = 1;
+        });
+        scopes.push(scope);
+        return;
+      }
+      if (type === 'name') {
+        ensureData(scopes[scopes.length-1], node[1]).use = 1;
+      }
+    }, function(node, type) {
+      if (type === 'defun' || type === 'function') {
+        var scope = scopes.pop();
+        var names = set();
+        for (name in scope) {
+          var data = scope[name];
+          if (data.use && !data.def) {
+            // this is used from a higher scope, propagate the use down
+            ensureData(scopes[scopes.length-1], name).use = 1;
+            continue;
+          }
+          if (data.def && !data.use && !data.param) {
+            // this is eliminateable!
+            names[name] = 0;
+          }
+        }
+        cleanUp(node[3], names);
       }
     });
-    return ast;
+    // toplevel
+    var scope = scopes.pop();
+    assert(scopes.length === 0);
+
+    var names = set();
+    for (var name in scope) {
+      var data = scope[name];
+      if (data.def && !data.use) {
+        assert(!data.param); // can't be
+        // this is eliminateable!
+        names[name] = 0;
+      }
+    }
+    cleanUp(ast, names);
+    return removed;
   }
-  var isVarNameOrObjectKeys = [];
-  // isVarNameOrObjectKeys is a stack which saves the state the node is defining a variable or in an object literal.
-  // the second argument `type` passed into the callback function called by traverse() could be a variable name or object key name.
-  // You cannot distinguish the `type` is a real type or not without isVarNameOrObjectKeys.
-  // ex.) var name = true;          // `type` can be 'name'
-  //      var obj = { defun: true } // `type` can be 'defun'
+  while (iteration() && multipleIterations) { }
+}
+
+// Aggressive JSDCE - multiple iterations
+function AJSDCE(ast) {
+  JSDCE(ast, /* multipleIterations= */ true);
+}
+
+function isAsmLibraryArgAssign(node) {
+  return node[0] === 'assign' && node[2][0] === 'dot'
+                              && node[2][1][0] === 'name' && node[2][1][1] === 'Module'
+                              && node[2][2] === 'asmLibraryArg';
+}
+
+function isAsmUse(node) {
+  return node[0] === 'sub' &&
+         ((node[1][0] === 'name' && node[1][1] === 'asm') || // asm['X']
+          (node[1][0] === 'sub' && node[1][1][0] === 'name' && node[1][1][1] === 'Module' && node[1][2][0] === 'string' && node[1][2][1] === 'asm')) && // Module
+         node[2][0] === 'string';
+}
+
+function isModuleUse(node) {
+  return node[0] === 'sub' &&
+         node[1][0] === 'name' && node[1][1] === 'Module' && // Module['X']
+         node[2][0] === 'string';
+}
+
+// Emit the DCE graph, to help optimize the combined JS+wasm.
+// This finds where JS depends on wasm, and where wasm depends
+// on JS, and prints that out.
+// TODO: full dependency/reachability analysis in JS
+function emitDCEGraph(ast) {
+  // The imports that wasm receives look like this:
+  //
+  //  Module.asmLibraryArg = { "abort": abort, "assert": assert, [..] };
+  //
+  // The exports are trickier, as they have a different form whether or not
+  // async compilation is enabled. It can be either:
+  //
+  //  var _malloc = Module["_malloc"] = asm["_malloc"];
+  //
+  // or
+  //
+  //  var _malloc = Module["_malloc"] = (function() {
+  //   return Module["asm"]["_malloc"].apply(null, arguments);
+  //  });
+  //
+  // Thus, one appearance of asm['malloc'] or Module['asm']['malloc'] is
+  // "free" - that is just receiving the export. And the same for
+  // Module['malloc']. We count other appearances
+  // of either _malloc or Module['_malloc'] or Module['asm']['_malloc'];
+  // if there are any, then the export appears to be used
+  // As mentioned in the TODO above, we should have full JS dependency
+  // analysis here, including scoping and so forth.
+
+  var imports = [];
+  var asmUses = {}; // uses of asm['X'] or Module['asm']['X']
+  var moduleUses = {}; // uses of Module['X']
+  var allUses = {}; // any use of X
   traverse(ast, function(node, type) {
-    if (isVarNameOrObjectKeys[isVarNameOrObjectKeys.length - 1]) { // check parent node defines a variable or is an object literal
-      // `type` is a variable name or an object key name
-      isVarNameOrObjectKeys.push(false); // doesn't define a variable nor be an object literal
-      return;
-    }
-    if (type === 'var') {
-      node[1].forEach(function(varItem, j) {
-        var name = varItem[0];
-        ensureData(scopes[scopes.length-1], name).def = 1;
+    if (isAsmLibraryArgAssign(node)) {
+      var items = node[3][1];
+      items.forEach(function(item) {
+        imports.push(item[0]); // the value doesn't matter, for now
       });
-      isVarNameOrObjectKeys.push(true); // this `node` defines a varible
-      return;
-    }
-    if (type === 'object') {
-      isVarNameOrObjectKeys.push(true); // this `node` is an object literal
-      return;
-    }
-    isVarNameOrObjectKeys.push(false); // doesn't define a variable nor be an object literal
-    if (type === 'defun' || type === 'function') {
-      if (node[1]) ensureData(scopes[scopes.length-1], node[1]).def = 1;
-      var scope = {};
-      node[2].forEach(function(param) {
-        ensureData(scope, param).def = 1;
-        scope[param].param = 1;
-      });
-      scopes.push(scope);
-      return;
-    }
-    if (type === 'name') {
-      ensureData(scopes[scopes.length-1], node[1]).use = 1;
-    }
-  }, function(node, type) {
-    isVarNameOrObjectKeys.pop();
-    if (isVarNameOrObjectKeys[isVarNameOrObjectKeys.length - 1]) return; // `type` is a variable name or an object key name
-    if (type === 'defun' || type === 'function') {
-      var scope = scopes.pop();
-      var names = set();
-      for (name in scope) {
-        var data = scope[name];
-        if (data.use && !data.def) {
-          // this is used from a higher scope, propagate the use down 
-          ensureData(scopes[scopes.length-1], name).use = 1;
-          continue;
+    } else if (type === 'sub') {
+      if (isAsmUse(node)) {
+        var name = node[2][1];
+        if (!asmUses[name]) {
+          asmUses[name] = 1;
+        } else {
+          asmUses[name]++;
         }
-        if (data.def && !data.use && !data.param) {
-          // this is eliminateable!
-          names[name] = 0;
+      } else if (isModuleUse(node)) {
+        var name = node[2][1];
+        if (!moduleUses[name]) {
+          moduleUses[name] = 1;
+        } else {
+          moduleUses[name]++;
         }
       }
-      cleanUp(node[3], names);
+    } else if (type === 'name') {
+      // Look, no scoping logic at all O.O
+      var name = node[1];
+      if (!allUses[name]) {
+        allUses[name] = 1;
+      } else {
+        allUses[name]++;
+      }
     }
   });
-  // toplevel
-  var scope = scopes.pop();
-  assert(scopes.length === 0);
-
-  var names = set();
-  for (var name in scope) {
-    var data = scope[name];
-    if (data.def && !data.use) {
-      assert(!data.param); // can't be
-      // this is eliminateable!
-      names[name] = 0;
+  // create the output
+  var graph = [];
+  imports.forEach(function(name) {
+    graph.push({
+      'name': 'emcc$import$' + name,
+      'import': ['env', name]
+    });
+  });
+  for (var name in asmUses) {
+    var node = {
+      'name': 'emcc$export$' + name,
+      'export': name
+    };
+    // root it, if it is a root. a non-root has at most one asmUse
+    // and moduleUse respectively (the "free" ones, that is getting
+    // the export), and none other
+    var unused = asmUses[name] === 1 && moduleUses[name] === 1 && !(name in allUses);
+    if (!unused) {
+      node['root'] = true;
     }
+    graph.push(node);
   }
-  cleanUp(ast, names);
+  print(JSON.stringify(graph, null, ' '));
+}
+
+// Apply graph removals from running wasm-metadce
+function applyDCEGraphRemovals(ast) {
+  var unused = set(extraInfo.unused);
+
+  traverse(ast, function(node, type) {
+    if (isAsmLibraryArgAssign(node)) {
+      node[3][1] = node[3][1].filter(function(item) {
+        var name = item[0];
+        var value = item[1];
+        var full = 'emcc$import$' + name;
+        return !((full in unused) && !hasSideEffects(value));
+      });
+    } else if (type === 'assign') {
+      // when we assign to a thing we don't need, we can just remove the assign
+      var target = node[2];
+      if (isAsmUse(target) || isModuleUse(target)) {
+        var name = target[2][1];
+        var full = 'emcc$export$' + name;
+        var value = node[3];
+        if ((full in unused) && !hasSideEffects(value)) {
+          return ['name', 'undefined'];
+        }
+      }
+    }
+  });
 }
 
 function removeFuncs(ast) {
@@ -7924,7 +8097,9 @@ function removeFuncs(ast) {
 
 // Passes table
 
-var minifyWhitespace = false, printMetadata = true, asm = false, asmPreciseF32 = false, emitJSON = false, last = false;
+var minifyWhitespace = false, printMetadata = true, asm = false,
+    asmPreciseF32 = false, emitJSON = false, last = false,
+    emitAst = true;
 
 var passes = {
   // passes
@@ -7959,6 +8134,9 @@ var passes = {
   dumpCallGraph: dumpCallGraph,
   asmLastOpts: asmLastOpts,
   JSDCE: JSDCE,
+  AJSDCE: AJSDCE,
+  emitDCEGraph: emitDCEGraph,
+  applyDCEGraphRemovals: applyDCEGraphRemovals,
   removeFuncs: removeFuncs,
   noop: function() {},
 
@@ -7970,6 +8148,7 @@ var passes = {
   emitJSON: function() { emitJSON = true },
   receiveJSON: function() { }, // handled in a special way, before passes are run
   last: function() { last = true },
+  noEmitAst: function() { emitAst = false },
 };
 
 // Main
@@ -8002,8 +8181,6 @@ if (arguments_.indexOf('receiveJSON') < 0) {
 }
 //printErr('ast: ' + JSON.stringify(ast));
 
-var emitAst = true;
-
 arguments_.slice(1).forEach(function(arg) {
   passes[arg](ast);
 });
@@ -8028,7 +8205,5 @@ if (emitAst) {
   } else {
     print(JSON.stringify(ast));
   }
-} else {
-  //print('/* not printing ast */');
 }
 
