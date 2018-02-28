@@ -32,7 +32,7 @@ import os, sys, shutil, tempfile, subprocess, shlex, time, re, logging
 from subprocess import PIPE
 from tools import shared, jsrun, system_libs
 from tools.shared import execute, suffix, unsuffixed, unsuffixed_basename, WINDOWS, safe_move, run_process, asbytes
-from tools.response_file import read_response_file
+from tools.response_file import substitute_response_files
 import tools.line_endings
 
 try:
@@ -82,7 +82,6 @@ DEBUG = os.environ.get('EMCC_DEBUG')
 if DEBUG == "0":
   DEBUG = None
 
-TEMP_DIR = os.environ.get('EMCC_TEMP_DIR')
 LEAVE_INPUTS_RAW = os.environ.get('EMCC_LEAVE_INPUTS_RAW') # Do not compile .ll files into .bc, just compile them with emscripten directly
                                                            # Not recommended, this is mainly for the test runner, or if you have some other
                                                            # specific need.
@@ -182,7 +181,8 @@ class EmccOptions(object):
     self.separate_asm = False
     self.cfi = False
     # Specifies the line ending format to use for all generated text files.
-    # Defaults to using the native EOL on each platform (\r\n on Windows, \n on Linux&OSX)
+    # Defaults to using the native EOL on each platform (\r\n on Windows, \n on
+    # Linux & MacOS)
     self.output_eol = os.linesep
 
 
@@ -238,8 +238,10 @@ class JSOptimizer(object):
         if len(chunks) == 1:
           self.run_passes(chunks[0], title, just_split=False, just_concat=False)
         else:
-          for i in range(len(chunks)):
-            self.run_passes(chunks[i], 'js_opts_' + str(i), just_split='receiveJSON' in chunks[i], just_concat='emitJSON' in chunks[i])
+          for i, chunk in enumerate(chunks):
+            self.run_passes(chunk, 'js_opts_' + str(i),
+                            just_split='receiveJSON' in chunk,
+                            just_concat='emitJSON' in chunk)
       else:
         # DEBUG 2, run each pass separately
         extra_info = self.extra_info
@@ -329,17 +331,7 @@ def run():
     exit(1)
 
   # read response files very early on
-  response_file = True
-  while response_file:
-    response_file = None
-    for index in range(1, len(sys.argv)):
-      if sys.argv[index][0] == '@':
-        # found one, loop again next time
-        response_file = True
-        extra_args = read_response_file(sys.argv[index])
-        # slice in extra_args in place of the response file arg
-        sys.argv[index:index+1] = extra_args
-        break
+  substitute_response_files(sys.argv)
 
   if len(sys.argv) == 1 or '--help' in sys.argv:
     # Documentation for emcc and its options must be updated in:
@@ -553,9 +545,8 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
 
   # Check if a target is specified
   target = None
-  for i in range(len(sys.argv)):
-    if sys.argv[i].startswith('-o='):
-      raise Exception('Invalid syntax: do not use -o=X, use -o X')
+  if any(arg.startswith('-o=') for arg in sys.argv):
+    raise Exception('Invalid syntax: do not use -o=X, use -o X')
 
   for i in reversed(range(len(sys.argv)-1)): # Last -o directive should take precedence, if multiple are specified
     if sys.argv[i] == '-o':
@@ -572,16 +563,10 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
   else:
     final_suffix = ''
 
-  if TEMP_DIR:
-    temp_dir = TEMP_DIR
-    if os.path.exists(temp_dir):
-      shutil.rmtree(temp_dir) # clear it
-    os.makedirs(temp_dir)
-  else:
-    temp_root = shared.TEMP_DIR
-    if not os.path.exists(temp_root):
-      os.makedirs(temp_root)
-    temp_dir = tempfile.mkdtemp(dir=temp_root)
+  temp_root = shared.TEMP_DIR
+  if not os.path.exists(temp_root):
+    os.makedirs(temp_root)
+  temp_dir = tempfile.mkdtemp(dir=temp_root)
 
   def in_temp(name):
     return os.path.join(temp_dir, os.path.basename(name))
@@ -641,8 +626,7 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
 
       options, settings_changes, newargs = parse_args(newargs)
 
-      for i in range(0, len(newargs)):
-        arg = newargs[i]
+      for arg in newargs:
         if arg == '-xc':
           use_cxx = False
           break
@@ -892,7 +876,7 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
         key, value = change.split('=', 1)
 
         # In those settings fields that represent amount of memory, translate suffixes to multiples of 1024.
-        if key in ['TOTAL_STACK', 'TOTAL_MEMORY', 'GL_MAX_TEMP_BUFFER_SIZE', 'SPLIT_MEMORY', 'WASM_MEM_MAX']:
+        if key in ['TOTAL_STACK', 'TOTAL_MEMORY', 'GL_MAX_TEMP_BUFFER_SIZE', 'SPLIT_MEMORY', 'WASM_MEM_MAX', 'DEFAULT_PTHREAD_STACK_SIZE']:
           value = str(shared.expand_byte_size_suffixes(value))
 
         original_exported_response = False
@@ -1369,6 +1353,10 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
           args += shared.EMSDK_CXX_OPTS
         if not shared.Building.can_inline():
           args.append('-fno-inline-functions')
+        # For fastcomp backend, no LLVM IR functions should ever be annotated 'optnone', because that would skip running the SimplifyCFG pass on them, which is required to always run to
+        # clean up LandingPadInst instructions that are not needed.
+        if not shared.Settings.WASM_BACKEND:
+          args += ['-Xclang', '-disable-O0-optnone']
         args = system_libs.process_args(args, shared.Settings)
         return args
 
@@ -1442,8 +1430,8 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
       if final_suffix not in EXECUTABLE_SUFFIXES:
         if not specified_target:
           assert len(temp_files) == len(input_files)
-          for i in range(len(input_files)):
-            safe_move(temp_files[i][1], unsuffixed_basename(input_files[i][1]) + final_ending)
+          for tempf, inputf in zip(temp_files, input_files):
+            safe_move(tempf[1], unsuffixed_basename(inputf[1]) + final_ending)
         else:
           if len(input_files) == 1:
             _, input_file = input_files[0]
@@ -1919,14 +1907,10 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
     if DEBUG: logging.debug('total time: %.2f seconds', (time.time() - start_time))
 
   finally:
-    if not TEMP_DIR:
-      try:
-        shutil.rmtree(temp_dir)
-      except:
-        pass
-    else:
-      logging.info('emcc saved files are in:' + temp_dir)
-
+    try:
+      shutil.rmtree(temp_dir)
+    except:
+      pass
 
 def parse_args(newargs):
   options = EmccOptions()
@@ -2467,9 +2451,12 @@ def modularize():
 
   return %(EXPORT_NAME)s;
 }%(instantiate)s;
-if (typeof module === "object" && module.exports) {
-  module['exports'] = %(EXPORT_NAME)s;
-};
+if (typeof exports === 'object' && typeof module === 'object')
+  module.exports = %(EXPORT_NAME)s;
+else if (typeof define === 'function' && define['amd'])
+  define([], function() { return %(EXPORT_NAME)s; });
+else if (typeof exports === 'object')
+  exports["%(EXPORT_NAME)s"] = %(EXPORT_NAME)s;
 ''' % {
   'EXPORT_NAME': shared.Settings.EXPORT_NAME,
   'src': src,

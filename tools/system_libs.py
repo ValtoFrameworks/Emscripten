@@ -1,5 +1,5 @@
 from __future__ import print_function
-import os, json, logging, zipfile, glob, shutil
+import os, json, logging, zipfile, tarfile, glob, shutil
 from . import shared
 from subprocess import Popen, CalledProcessError
 import subprocess, multiprocessing, re
@@ -56,6 +56,7 @@ def calculate(temp_files, in_temp, stdout_, stderr_, forced=[]):
   al_symbols = read_symbols(shared.path_from_root('system', 'lib', 'al.symbols'))
   compiler_rt_symbols = read_symbols(shared.path_from_root('system', 'lib', 'compiler-rt.symbols'))
   pthreads_symbols = read_symbols(shared.path_from_root('system', 'lib', 'pthreads.symbols'))
+  asmjs_pthreads_symbols = read_symbols(shared.path_from_root('system', 'lib', 'asmjs_pthreads.symbols'))
   wasm_libc_symbols = read_symbols(shared.path_from_root('system', 'lib', 'wasm-libc.symbols'))
   html5_symbols = read_symbols(shared.path_from_root('system', 'lib', 'html5.symbols'))
 
@@ -116,7 +117,7 @@ def calculate(temp_files, in_temp, stdout_, stderr_, forced=[]):
     blacklist = set(
       ['ipc', 'passwd', 'thread', 'signal', 'sched', 'ipc', 'time', 'linux', 'aio', 'exit', 'legacy', 'mq', 'process', 'search', 'setjmp', 'env', 'ldso', 'conf'] + # musl modules
       ['memcpy.c', 'memset.c', 'memmove.c', 'getaddrinfo.c', 'getnameinfo.c', 'inet_addr.c', 'res_query.c', 'gai_strerror.c', 'proto.c', 'gethostbyaddr.c', 'gethostbyaddr_r.c', 'gethostbyname.c', 'gethostbyname2_r.c', 'gethostbyname_r.c', 'gethostbyname2.c', 'usleep.c', 'alarm.c', 'syscall.c', '_exit.c'] + # individual files
-      ['abs.c', 'cos.c', 'cosf.c', 'cosl.c', 'sin.c', 'sinf.c', 'sinl.c', 'tan.c', 'tanf.c', 'tanl.c', 'acos.c', 'acosf.c', 'acosl.c', 'asin.c', 'asinf.c', 'asinl.c', 'atan.c', 'atanf.c', 'atanl.c', 'atan2.c', 'atan2f.c', 'atan2l.c', 'exp.c', 'expf.c', 'expl.c', 'log.c', 'logf.c', 'logl.c', 'sqrt.c', 'sqrtf.c', 'sqrtl.c', 'fabs.c', 'fabsf.c', 'fabsl.c', 'ceil.c', 'ceilf.c', 'ceill.c', 'floor.c', 'floorf.c', 'floorl.c', 'pow.c', 'powf.c', 'powl.c', 'round.c', 'roundf.c'] # individual math files
+      ['abs.c', 'cos.c', 'cosf.c', 'cosl.c', 'sin.c', 'sinf.c', 'sinl.c', 'tan.c', 'tanf.c', 'tanl.c', 'acos.c', 'acosf.c', 'acosl.c', 'asin.c', 'asinf.c', 'asinl.c', 'atan.c', 'atanf.c', 'atanl.c', 'atan2.c', 'atan2f.c', 'atan2l.c', 'exp.c', 'expf.c', 'expl.c', 'log.c', 'logf.c', 'logl.c', 'sqrt.c', 'sqrtf.c', 'sqrtl.c', 'fabs.c', 'fabsf.c', 'fabsl.c', 'ceil.c', 'ceilf.c', 'ceill.c', 'floor.c', 'floorf.c', 'floorl.c', 'pow.c', 'powf.c', 'powl.c', 'round.c', 'roundf.c', 'rintf.c'] # individual math files
     )
     # TODO: consider using more math code from musl, doing so makes box2d faster
     for dirpath, dirnames, filenames in os.walk(musl_srcdir):
@@ -178,6 +179,10 @@ def calculate(temp_files, in_temp, stdout_, stderr_, forced=[]):
         'pthread_setspecific.c', 'pthread_setcancelstate.c'
       ])
     pthreads_files += [os.path.join('pthread', 'library_pthread.c')]
+    return build_libc(libname, pthreads_files, ['-O2', '-s', 'USE_PTHREADS=1'])
+
+  def create_pthreads_asmjs(libname):
+    pthreads_files = [os.path.join('pthread', 'library_pthread_asmjs.c')]
     return build_libc(libname, pthreads_files, ['-O2', '-s', 'USE_PTHREADS=1'])
 
   def create_wasm_libc(libname):
@@ -323,13 +328,18 @@ def calculate(temp_files, in_temp, stdout_, stderr_, forced=[]):
   def create_wasm_rt_lib(libname, files):
     o_s = []
     commands = []
+    # Output should be an object file with lld, otherwise text assembly
+    output_flag = '-c' if shared.Settings.EXPERIMENTAL_USE_LLD else '-S'
     for src in files:
       o = in_temp(os.path.basename(src) + '.o')
       # Use clang directly instead of emcc. Since emcc's intermediate format (produced by -S) is LLVM IR, there's no way to
       # get emcc to output wasm .s files, which is what we archive in compiler_rt.
       commands.append([
-        shared.CLANG_CC, '--target=wasm32', '-mthread-model', 'single',
-        '-S', shared.path_from_root('system', 'lib', src),
+        shared.CLANG_CC,
+        '--target={}'.format(shared.WASM_TARGET),
+        '-mthread-model', 'single',
+        output_flag,
+        shared.path_from_root('system', 'lib', src),
         '-O2', '-o', o] + musl_internal_includes() + shared.EMSDK_OPTS)
       o_s.append(o)
     run_commands(commands)
@@ -366,6 +376,9 @@ def calculate(temp_files, in_temp, stdout_, stderr_, forced=[]):
         'fmin.c', 'fminf.c', 'fminl.c',
         'fmax.c', 'fmaxf.c', 'fmaxl.c',
         'fmod.c', 'fmodf.c', 'fmodl.c',
+        'log2.c', 'log2f.c', 'log10.c', 'log10f.c',
+        'exp2.c', 'exp2f.c', 'exp10.c', 'exp10f.c',
+        'scalbn.c',
       ])
     string_files = files_in_path(
       path_components=['system', 'lib', 'libc', 'musl', 'src', 'string'],
@@ -442,9 +455,11 @@ def calculate(temp_files, in_temp, stdout_, stderr_, forced=[]):
                  (dlmalloc_name(), 'bc', create_dlmalloc,    [],                  [],            False)]
 
   if shared.Settings.USE_PTHREADS:
-    system_libs += [('libc-mt',       'bc', create_libc,       libc_symbols,     [],       False),
-                    ('pthreads',      'bc', create_pthreads,   pthreads_symbols, ['libc'], False)]
+    system_libs += [('libc-mt',        'bc', create_libc,           libc_symbols,     [],       False),
+                    ('pthreads',       'bc', create_pthreads,       pthreads_symbols, ['libc'], False),
+                    ('pthreads_asmjs', 'bc', create_pthreads_asmjs, asmjs_pthreads_symbols, ['libc'], False)]
     force.add('pthreads')
+    force.add('pthreads_asmjs')
   else:
     system_libs += [('libc', 'bc', create_libc, libc_symbols, [], False)]
 
@@ -572,7 +587,7 @@ class Ports(object):
   name_cache = set()
 
   @staticmethod
-  def fetch_project(name, url, subdir):
+  def fetch_project(name, url, subdir, is_tarbz2=False):
     fullname = os.path.join(Ports.get_dir(), name)
 
     if name not in Ports.name_cache: # only mention each port once in log
@@ -623,12 +638,15 @@ class Ports(object):
         from urllib2 import urlopen
       f = urlopen(url)
       data = f.read()
-      open(fullname + '.zip', 'wb').write(data)
+      open(fullname + ('.zip' if not is_tarbz2 else '.tar.bz2'), 'wb').write(data)
       State.retrieved = True
 
     def check_tag():
-      z = zipfile.ZipFile(fullname + '.zip', 'r')
-      names = z.namelist()
+      if is_tarbz2:
+        names = tarfile.open(fullname + '.tar.bz2', 'r:bz2').getnames()
+      else:
+        names = zipfile.ZipFile(fullname + '.zip', 'r').namelist()
+
       if not (names[0].startswith(subdir + '/') or names[0].startswith(subdir + '\\')):
         # current zip file is old, force a retrieve
         return False
@@ -637,7 +655,10 @@ class Ports(object):
     def unpack():
       logging.warning('unpacking port: ' + name)
       shared.safe_ensure_dirs(fullname)
-      z = zipfile.ZipFile(fullname + '.zip', 'r')
+      if is_tarbz2:
+        z = tarfile.open(fullname + '.tar.bz2', 'r:bz2')
+      else:
+        z = zipfile.ZipFile(fullname + '.zip', 'r')
       try:
         cwd = os.getcwd()
         os.chdir(fullname)
