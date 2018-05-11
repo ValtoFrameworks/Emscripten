@@ -284,7 +284,7 @@ LibraryManager.library = {
     switch(name) {
       case {{{ cDefine('_SC_PAGE_SIZE') }}}: return PAGE_SIZE;
       case {{{ cDefine('_SC_PHYS_PAGES') }}}:
-#if BINARYEN
+#if WASM
         var maxHeapSize = 2*1024*1024*1024 - 65536;
 #else
         var maxHeapSize = 2*1024*1024*1024 - 16777216;
@@ -1084,7 +1084,7 @@ LibraryManager.library = {
     return 'var cttz_i8 = allocate([' + range(256).map(function(x) { return cttz(x) }).join(',') + '], "i8", ALLOC_STATIC);';
 #endif
   }],
-#if BINARYEN == 0 // binaryen will convert these calls to wasm anyhow
+#if WASM == 0 // binaryen will convert these calls to wasm anyhow
   llvm_cttz_i32__asm: true,
 #endif
   llvm_cttz_i32__sig: 'ii',
@@ -1147,7 +1147,8 @@ LibraryManager.library = {
     infos: {},
     deAdjust: function(adjusted) {
       if (!adjusted || EXCEPTIONS.infos[adjusted]) return adjusted;
-      for (var ptr in EXCEPTIONS.infos) {
+      for (var key in EXCEPTIONS.infos) {
+        var ptr = +key; // the iteration key is a string, and if we throw this, it must be an integer as that is what we look for
         var info = EXCEPTIONS.infos[ptr];
         if (info.adjusted === adjusted) {
 #if EXCEPTION_DEBUG
@@ -1257,6 +1258,7 @@ LibraryManager.library = {
   __cxa_rethrow__deps: ['__cxa_end_catch', '$EXCEPTIONS'],
   __cxa_rethrow: function() {
     var ptr = EXCEPTIONS.caught.pop();
+    ptr = EXCEPTIONS.deAdjust(ptr);
     if (!EXCEPTIONS.infos[ptr].rethrown) {
       // Only pop if the corresponding push was through rethrow_primary_exception
       EXCEPTIONS.caught.push(ptr)
@@ -1750,7 +1752,7 @@ LibraryManager.library = {
 
       var lib_module;
       try {
-#if BINARYEN
+#if WASM
         // the shared library is a shared wasm library (see tools/shared.py WebAssembly.make_shared_library)
         var lib_data = FS.readFile(filename, { encoding: 'binary' });
         if (!(lib_data instanceof Uint8Array)) lib_data = new Uint8Array(lib_data);

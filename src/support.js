@@ -49,7 +49,7 @@ var loadedDynamicLibraries = [];
 
 function loadDynamicLibrary(lib) {
   var libModule;
-#if BINARYEN
+#if WASM
   var bin;
   if (lib.buffer) {
     // we were provided the binary, in a typed array
@@ -84,7 +84,7 @@ function loadDynamicLibrary(lib) {
   loadedDynamicLibraries.push(libModule);
 }
 
-#if BINARYEN
+#if WASM
 // Loads a side module from binary data
 function loadWebAssemblyModule(binary) {
   var int32View = new Uint32Array(new Uint8Array(binary.subarray(0, 24)).buffer);
@@ -112,12 +112,29 @@ function loadWebAssemblyModule(binary) {
   assert(binary[next] === 'n'.charCodeAt(0)); next++;
   assert(binary[next] === 'k'.charCodeAt(0)); next++;
   var memorySize = getLEB();
+  var memoryAlign = getLEB();
   var tableSize = getLEB();
+  var tableAlign = getLEB();
+  // alignments are powers of 2
+  memoryAlign = Math.pow(2, memoryAlign);
+  tableAlign = Math.pow(2, tableAlign);
+  // finalize alignments and verify them
+  memoryAlign = Math.max(memoryAlign, STACK_ALIGN); // we at least need stack alignment
+  assert(tableAlign === 1);
+  // prepare memory
+  var memoryStart = alignMemory(getMemory(memorySize + memoryAlign), memoryAlign); // TODO: add to cleanups
+  // The static area consists of explicitly initialized data, followed by zero-initialized data.
+  // The latter may need zeroing out if the MAIN_MODULE has already used this memory area before
+  // dlopen'ing the SIDE_MODULE.  Since we don't know the size of the explicitly initialized data
+  // here, we just zero the whole thing, which is suboptimal, but should at least resolve bugs
+  // from uninitialized memory.
+  for (var i = memoryStart; i < memoryStart + memorySize; ++i) HEAP8[i] = 0;
+  // prepare env imports
   var env = Module['asmLibraryArg'];
   // TODO: use only memoryBase and tableBase, need to update asm.js backend
   var table = Module['wasmTable'];
   var oldTableSize = table.length;
-  env['memoryBase'] = env['gb'] = alignMemory(getMemory(memorySize + STACK_ALIGN), STACK_ALIGN); // TODO: add to cleanups
+  env['memoryBase'] = env['gb'] = memoryStart;
   env['tableBase'] = env['fb'] = oldTableSize;
   var originalTable = table;
   table.grow(tableSize);
@@ -202,7 +219,7 @@ function loadWebAssemblyModule(binary) {
   }
   return exports;
 }
-#endif // BINARYEN
+#endif // WASM
 #endif // RELOCATABLE
 
 #if EMULATED_FUNCTION_POINTERS
@@ -279,8 +296,7 @@ function addFunction(func, sig) {
 #endif // WASM_BACKEND
 #if ASSERTIONS
   if (typeof sig === 'undefined') {
-    Module.printErr('Warning: addFunction: Provide a wasm function signature ' +
-                    'string as a second argument');
+    Module.printErr('warning: addFunction(): You should provide a wasm function signature string as a second argument. This is not necessary for asm.js and asm2wasm, but is required for the LLVM wasm backend, so it is recommended for full portability.');
   }
 #endif // ASSERTIONS
 #if EMULATED_FUNCTION_POINTERS == 0
@@ -297,7 +313,7 @@ function addFunction(func, sig) {
   }
   throw 'Finished up all reserved function pointers. Use a higher value for RESERVED_FUNCTION_POINTERS.';
 #else
-#if BINARYEN
+#if WASM
   // we can simply append to the wasm table
   var table = Module['wasmTable'];
   var ret = table.length;
