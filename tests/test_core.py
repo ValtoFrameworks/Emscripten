@@ -2874,7 +2874,7 @@ def process(filename):
           raise Exception('Could not find symbol table!')
       table = table[table.find('{'):table.find('}')+1]
       # ensure there aren't too many globals; we don't want unnamed_addr
-      assert table.count(',') <= 27, table.count(',')
+      assert table.count(',') <= 28, table.count(',')
 
     test_path = path_from_root('tests', 'core', 'test_dlfcn_self')
     src, output = (test_path + s for s in ('.c', '.out'))
@@ -7407,6 +7407,77 @@ int main() {
     self.emcc_args += ['--js-library', 'lib.js']
     self.do_run(src, 'Hello')
 
+  def test_async_invoke_safe_heap(self):
+    if not self.is_emterpreter(): return self.skip('emterpreter-only test')
+
+    self.banned_js_engines = [SPIDERMONKEY_ENGINE, V8_ENGINE] # needs setTimeout which only node has
+
+    # SAFE_HEAP leads to SAFE_FT_MASK, which appear in dynCall_*
+    # and then if they are interpreted, that messes up reloading
+    # of the stack (we can't run emterpreted code at that time,
+    # we should just see calls and follow them).
+    Settings.EMTERPRETIFY_ASYNC = 1
+    Settings.SAFE_HEAP = 1
+    Settings.EXPORTED_FUNCTIONS = ['_async_callback_test']
+    Settings.EXTRA_EXPORTED_RUNTIME_METHODS = ["ccall"]
+    Settings.DISABLE_EXCEPTION_CATCHING = 0
+    Settings.ALLOW_MEMORY_GROWTH = 1
+    Settings.EMTERPRETIFY = 1
+    Settings.EMTERPRETIFY_ASYNC = 1
+    Settings.ASSERTIONS = 2
+
+    open('post.js', 'w').write(r'''
+var AsyncOperation = {
+  done: false,
+
+  start: function() {
+    // this.done = true; // uncomment this line => no crash
+    Promise.resolve().then(function() {
+      console.log('done!');
+      AsyncOperation.done = true;
+    });
+  }
+};
+
+Module.ccall('async_callback_test', null, [], [], { async: true });
+''')
+
+    src = r'''
+#include <stdio.h>
+#include <emscripten.h>
+
+extern "C" {
+  void call_async_operation() {
+    printf("start\n");
+    EM_ASM({AsyncOperation.start()});
+    printf("mid\n");
+    while (!EM_ASM_INT({return AsyncOperation.done})) {
+      printf("sleep1\n");
+      emscripten_sleep(200);
+      printf("sleep2\n");
+    }
+  }
+
+  // remove throw() => no crash
+  static void nothrow_func() throw()
+  {
+    call_async_operation();
+    printf("async operation OK\n");
+  }
+
+  void async_callback_test() {
+    nothrow_func();
+  }
+}'''
+
+    self.emcc_args += [
+      '--post-js', 'post.js',
+      '--profiling-funcs',
+      '--minify', '0',
+      '--memory-init-file', '0'
+    ]
+    self.do_run(src, 'async operation OK')
+
   def do_test_coroutine(self, additional_settings):
     Settings.NO_EXIT_RUNTIME = 0 # needs to flush stdio streams
     src = open(path_from_root('tests', 'test_coroutines.cpp')).read()
@@ -7554,6 +7625,27 @@ int main() {
   def test_wrap_malloc(self):
     self.do_run(open(path_from_root('tests', 'wrap_malloc.cpp')).read(), 'OK.')
 
+  def test_environment(self):
+    for engine in JS_ENGINES:
+      for work in (1, 0):
+        # set us to test in just this engine
+        self.banned_js_engines = [e for e in JS_ENGINES if e != engine]
+        # tell the compiler to build with just that engine
+        if engine == NODE_JS and work:
+          Settings.ENVIRONMENT = 'node'
+        else:
+          Settings.ENVIRONMENT = 'shell'
+        print(engine, work, Settings.ENVIRONMENT)
+        try:
+          self.do_run_in_out_file_test('tests', 'core', 'test_hello_world')
+        except Exception as e:
+          if not work:
+            self.assertContained('not compiled for this environment', str(e))
+          else:
+            raise
+        js = open('src.cpp.o.js').read()
+        assert ('require(' in js) == (Settings.ENVIRONMENT == 'node'), 'we should have require() calls only if node js specified'
+
 # Generate tests for everything
 def make_run(fullname, name=-1, compiler=-1, embetter=0, quantum_size=0,
     typed_arrays=0, emcc_args=None, env=None):
@@ -7632,7 +7724,6 @@ binaryenz = make_run('binaryenz', compiler=CLANG, emcc_args=['-Oz'])
 
 # asm.js
 asm2f = make_run('asm2f', compiler=CLANG, emcc_args=['-Oz', '-s', 'PRECISE_F32=1', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'WASM=0'])
-asm2i = make_run('asm2i', compiler=CLANG, emcc_args=['-O2', '-s', 'EMTERPRETIFY=1', '-s', 'WASM=0'])
 asm2nn = make_run('asm2nn', compiler=CLANG, emcc_args=['-O2', '-s', 'WASM=0'], env={'EMCC_NATIVE_OPTIMIZER': '0'})
 
 # wasm
@@ -7640,5 +7731,9 @@ binaryen2jo = make_run('binaryen2jo', compiler=CLANG, emcc_args=['-O2', '-s', 'B
 binaryen3jo = make_run('binaryen3jo', compiler=CLANG, emcc_args=['-O3', '-s', 'BINARYEN_METHOD="native-wasm,asmjs"'])
 binaryen2s = make_run('binaryen2s', compiler=CLANG, emcc_args=['-O2', '-s', 'SAFE_HEAP=1'])
 binaryen2_interpret = make_run('binaryen2_interpret', compiler=CLANG, emcc_args=['-O2', '-s', 'BINARYEN_METHOD="interpret-binary"'])
+
+# emterpreter
+asmi = make_run('asmi', compiler=CLANG, emcc_args=['-s', 'EMTERPRETIFY=1', '-s', 'WASM=0'])
+asm2i = make_run('asm2i', compiler=CLANG, emcc_args=['-O2', '-s', 'EMTERPRETIFY=1', '-s', 'WASM=0'])
 
 del T # T is just a shape for the specific subclasses, we don't test it itself

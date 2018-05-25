@@ -7976,7 +7976,7 @@ int main() {
                  0, [],                         ['tempDoublePtr', 'waka'],     8,   0,    0), # totally empty!
       # but we don't metadce with linkable code! other modules may want it
       (['-O3', '-s', 'MAIN_MODULE=1'],
-              1542, ['invoke_i'],               ['waka'],                 496958, 168, 2558),
+              1541, ['invoke_i'],               ['waka'],                 496958, 168, 2560),
     ])
 
     print('test on a minimal pure computational thing')
@@ -8361,3 +8361,20 @@ end
 
   def test_fd_closed(self):
     self.do_other_test(os.path.join('other', 'fd_closed'))
+
+  def test_js_optimizer_parse_error(self):
+    # check we show a proper understandable error for JS parse problems
+    open('src.cpp', 'w').write(r'''
+#include <emscripten.h>
+int main() {
+  EM_ASM({
+    var x = !<->5.; // wtf
+  });
+}
+''')
+    output = run_process([PYTHON, EMCC, 'src.cpp', '-O2'], stdout=PIPE, stderr=PIPE, check=False)
+    self.assertContained('''
+var ASM_CONSTS = [function() { var x = !<->5.; }];
+                                        ^
+''', output.stderr)
+
