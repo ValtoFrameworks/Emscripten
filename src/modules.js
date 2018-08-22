@@ -305,9 +305,14 @@ function exportRuntime() {
     // if requested to be exported, export it
     if (name in EXPORTED_RUNTIME_METHODS_SET) {
       var exported = name;
+      // the exported name may differ from the internal name
       if (isFSPrefixed(exported)) {
         // this is a filesystem value, FS.x exported as FS_x
         exported = 'FS.' + exported.substr(3);
+      } else if (exported === 'print') {
+        exported = 'out';
+      } else if (exported === 'printErr') {
+        exported = 'err';
       }
       return 'Module["' + name + '"] = ' + exported + ';';
     }
@@ -371,6 +376,7 @@ function exportRuntime() {
     'writeAsciiToMemory',
     'addRunDependency',
     'removeRunDependency',
+    'ENV',
     'FS',
     'FS_createFolder',
     'FS_createPath',
@@ -400,6 +406,9 @@ function exportRuntime() {
     'stackSave',
     'stackRestore',
     'stackAlloc',
+    'establishStackSpace',
+    'print',
+    'printErr',
   ];
   if (SUPPORT_BASE64_EMBEDDING) {
     runtimeElements.push('intArrayFromBase64');

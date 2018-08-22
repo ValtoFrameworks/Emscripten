@@ -11,14 +11,21 @@ stackSave = stackRestore = stackAlloc = setTempRet0 = getTempRet0 = function() {
 #endif
 
 function staticAlloc(size) {
+#if ASSERTIONS
   assert(!staticSealed);
+#endif
   var ret = STATICTOP;
   STATICTOP = (STATICTOP + size + 15) & -16;
+#if ASSERTIONS
+  assert(STATICTOP < TOTAL_MEMORY, 'not enough memory for static allocation - increase TOTAL_MEMORY');
+#endif
   return ret;
 }
 
 function dynamicAlloc(size) {
+#if ASSERTIONS
   assert(DYNAMICTOP_PTR);
+#endif
   var ret = HEAP32[DYNAMICTOP_PTR>>2];
   var end = (ret + size + 15) & -16;
   HEAP32[DYNAMICTOP_PTR>>2] = end;
@@ -40,9 +47,36 @@ function warnOnce(text) {
   if (!warnOnce.shown) warnOnce.shown = {};
   if (!warnOnce.shown[text]) {
     warnOnce.shown[text] = 1;
-    Module.printErr(text);
+    err(text);
   }
 }
+
+var asm2wasmImports = { // special asm2wasm imports
+    "f64-rem": function(x, y) {
+        return x % y;
+    },
+    "debugger": function() {
+        debugger;
+    }
+#if NEED_ALL_ASM2WASM_IMPORTS
+    ,
+    "f64-to-int": function(x) {
+        return x | 0;
+    },
+    "i32s-div": function(x, y) {
+        return ((x | 0) / (y | 0)) | 0;
+    },
+    "i32u-div": function(x, y) {
+        return ((x >>> 0) / (y >>> 0)) >>> 0;
+    },
+    "i32s-rem": function(x, y) {
+        return ((x | 0) % (y | 0)) | 0;
+    },
+    "i32u-rem": function(x, y) {
+        return ((x >>> 0) % (y >>> 0)) >>> 0;
+    }
+#endif // NEED_ALL_ASM2WASM_IMPORTS
+};
 
 #if RELOCATABLE
 var loadedDynamicLibraries = [];
@@ -76,7 +110,7 @@ function loadDynamicLibrary(lib) {
       var curr = Module[sym], next = libModule[sym];
       // don't warn on functions - might be odr, linkonce_odr, etc.
       if (!(typeof curr === 'function' && typeof next === 'function')) {
-        Module.printErr("warning: trying to dynamically load symbol '" + sym + "' (from '" + lib + "') that already exists (duplicate symbol? or weak linking, which isn't supported yet?)"); // + [curr, ' vs ', next]);
+        err("warning: trying to dynamically load symbol '" + sym + "' (from '" + lib + "') that already exists (duplicate symbol? or weak linking, which isn't supported yet?)"); // + [curr, ' vs ', next]);
       }
     }
 #endif
@@ -86,9 +120,9 @@ function loadDynamicLibrary(lib) {
 
 #if WASM
 // Loads a side module from binary data
-function loadWebAssemblyModule(binary) {
+function loadWebAssemblyModule(binary, loadAsync) {
   var int32View = new Uint32Array(new Uint8Array(binary.subarray(0, 24)).buffer);
-  assert(int32View[0] == 0x6d736100, 'need to see wasm magic number'); // \0wasm
+  assert(int32View[0] == 0x6d736100, 'need to see wasm magic number'); // \0asm
   // we should see the dylink section right after the magic number and wasm version
   assert(binary[8] === 0, 'need the dylink section to be first')
   var next = 9;
@@ -152,13 +186,45 @@ function loadWebAssemblyModule(binary) {
       env[x] = Module[x];
     }
   }
+  // wasm dynamic libraries are pure wasm, so they cannot assist in
+  // their own loading. When side module A wants to import something
+  // provided by a side module B that is loaded later, we need to
+  // add a layer of indirection, but worse, we can't even tell what
+  // to add the indirection for, without inspecting what A's imports
+  // are. To do that here, we use a JS proxy (another option would
+  // be to inspect the binary directly).
+  var proxyHandler = {
+    'get': function(obj, prop) {
+      if (prop in obj) {
+        return obj[prop]; // already present
+      }
+      if (prop.startsWith('g$')) {
+        // a global. the g$ function returns the global address.
+        var name = prop.substr(2); // without g$ prefix
+        return env[prop] = function() {
+#if ASSERTIONS
+          assert(Module[name], 'missing linked global ' + name);
+#endif
+          return Module[name];
+        };
+      }
+      // if not a global, then a function - call it indirectly
+      return env[prop] = function() {
+#if ASSERTIONS
+        assert(Module[prop], 'missing linked function ' + prop);
+#endif
+        return Module[prop].apply(null, arguments);
+      };
+    }
+  };
   var info = {
     global: {
       'NaN': NaN,
       'Infinity': Infinity,
     },
     'global.Math': Math,
-    env: env
+    env: new Proxy(env, proxyHandler),
+    'asm2wasm': asm2wasmImports
   };
 #if ASSERTIONS
   var oldTable = [];
@@ -166,59 +232,71 @@ function loadWebAssemblyModule(binary) {
     oldTable.push(table.get(i));
   }
 #endif
-  // create a module from the instance
-  var instance = new WebAssembly.Instance(new WebAssembly.Module(binary), info);
+
+  function postInstantiation(instance) {
+    var exports = {};
 #if ASSERTIONS
-  // the table should be unchanged
-  assert(table === originalTable);
-  assert(table === Module['wasmTable']);
-  if (instance.exports['table']) {
-    assert(table === instance.exports['table']);
-  }
-  // the old part of the table should be unchanged
-  for (var i = 0; i < oldTableSize; i++) {
-    assert(table.get(i) === oldTable[i], 'old table entries must remain the same');
-  }
-  // verify that the new table region was filled in
-  for (var i = 0; i < tableSize; i++) {
-    assert(table.get(oldTableSize + i) !== undefined, 'table entry was not filled in');
-  }
-#endif
-  var exports = {};
-  for (var e in instance.exports) {
-    var value = instance.exports[e];
-    if (typeof value === 'object') {
-      // a breaking change in the wasm spec, globals are now objects
-      // https://github.com/WebAssembly/mutable-global/issues/1
-      value = value.value;
+    // the table should be unchanged
+    assert(table === originalTable);
+    assert(table === Module['wasmTable']);
+    if (instance.exports['table']) {
+      assert(table === instance.exports['table']);
     }
-    if (typeof value === 'number') {
-      // relocate it - modules export the absolute value, they can't relocate before they export
-#if EMULATED_FUNCTION_POINTERS
-      // it may be a function pointer
-      if (e.substr(0, 3) == 'fp$' && typeof instance.exports[e.substr(3)] === 'function') {
-        value = value + env['tableBase'];
-      } else {
+    // the old part of the table should be unchanged
+    for (var i = 0; i < oldTableSize; i++) {
+      assert(table.get(i) === oldTable[i], 'old table entries must remain the same');
+    }
+    // verify that the new table region was filled in
+    for (var i = 0; i < tableSize; i++) {
+      assert(table.get(oldTableSize + i) !== undefined, 'table entry was not filled in');
+    }
 #endif
-        value = value + env['memoryBase'];
-#if EMULATED_FUNCTION_POINTERS
+    for (var e in instance.exports) {
+      var value = instance.exports[e];
+      if (typeof value === 'object') {
+        // a breaking change in the wasm spec, globals are now objects
+        // https://github.com/WebAssembly/mutable-global/issues/1
+        value = value.value;
       }
+      if (typeof value === 'number') {
+        // relocate it - modules export the absolute value, they can't relocate before they export
+#if EMULATE_FUNCTION_POINTER_CASTS
+        // it may be a function pointer
+        if (e.substr(0, 3) == 'fp$' && typeof instance.exports[e.substr(3)] === 'function') {
+          value = value + env['tableBase'];
+        } else {
 #endif
+          value = value + env['memoryBase'];
+#if EMULATE_FUNCTION_POINTER_CASTS
+        }
+#endif
+      }
+      exports[e] = value;
     }
-    exports[e] = value;
-  }
-  // initialize the module
-  var init = exports['__post_instantiate'];
-  if (init) {
-    if (runtimeInitialized) {
-      init();
-    } else {
-      // we aren't ready to run compiled code yet
-      __ATINIT__.push(init);
+    // initialize the module
+    var init = exports['__post_instantiate'];
+    if (init) {
+      if (runtimeInitialized) {
+        init();
+      } else {
+        // we aren't ready to run compiled code yet
+        __ATINIT__.push(init);
+      }
     }
+    return exports;
   }
-  return exports;
+
+  if (loadAsync) {
+    return WebAssembly.instantiate(binary, info).then(function(result) {
+      return postInstantiation(result.instance);
+    });
+  } else {
+    var instance = new WebAssembly.Instance(new WebAssembly.Module(binary), info);
+    return postInstantiation(instance);
+  }
 }
+Module['loadWebAssemblyModule'] = loadWebAssemblyModule;
+
 #endif // WASM
 #endif // RELOCATABLE
 
@@ -296,7 +374,7 @@ function addFunction(func, sig) {
 #endif // WASM_BACKEND
 #if ASSERTIONS
   if (typeof sig === 'undefined') {
-    Module.printErr('warning: addFunction(): You should provide a wasm function signature string as a second argument. This is not necessary for asm.js and asm2wasm, but is required for the LLVM wasm backend, so it is recommended for full portability.');
+    err('warning: addFunction(): You should provide a wasm function signature string as a second argument. This is not necessary for asm.js and asm2wasm, but is required for the LLVM wasm backend, so it is recommended for full portability.');
   }
 #endif // ASSERTIONS
 #if EMULATED_FUNCTION_POINTERS == 0
@@ -504,4 +582,3 @@ var GLOBAL_BASE = {{{ GLOBAL_BASE }}};
 #if RELOCATABLE
 GLOBAL_BASE = alignMemory(GLOBAL_BASE, {{{ MAX_GLOBAL_ALIGN || 1 }}});
 #endif
-

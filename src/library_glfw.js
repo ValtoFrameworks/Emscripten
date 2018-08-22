@@ -610,7 +610,7 @@ var LibraryGLFW = {
     },
 
     requestFullScreen: function() {
-      Module.printErr('GLFW.requestFullScreen() is deprecated. Please call GLFW.requestFullscreen instead.');
+      err('GLFW.requestFullScreen() is deprecated. Please call GLFW.requestFullscreen instead.');
       GLFW.requestFullScreen = function() {
         return GLFW.requestFullscreen();
       }
@@ -627,7 +627,7 @@ var LibraryGLFW = {
     },
 
     cancelFullScreen: function() {
-      Module.printErr('GLFW.cancelFullScreen() is deprecated. Please call GLFW.exitFullscreen instead.');
+      err('GLFW.cancelFullScreen() is deprecated. Please call GLFW.exitFullscreen instead.');
       GLFW.cancelFullScreen = function() {
         return GLFW.exitFullscreen();
       }
@@ -996,6 +996,10 @@ var LibraryGLFW = {
           stencil: (GLFW.hints[0x00021006] > 0),   // GLFW_STENCIL_BITS
           alpha: (GLFW.hints[0x00021004] > 0)      // GLFW_ALPHA_BITS 
         }
+#if OFFSCREEN_FRAMEBUFFER
+        // TODO: Make GLFW explicitly aware of whether it is being proxied or not, and set these to true only when proxying is being performed.
+        GL.enableOffscreenFramebufferAttributes(contextAttributes);
+#endif
         Module.ctx = Browser.createContext(Module['canvas'], true, true, contextAttributes);
       }
 
@@ -1551,7 +1555,7 @@ var LibraryGLFW = {
   glfwMakeContextCurrent: function(winid) {},
 
   glfwGetCurrentContext: function() {
-    return GLFW.active.id;
+    return GLFW.active ? GLFW.active.id : 0;
   },
 
   glfwSwapBuffers: function(winid) {

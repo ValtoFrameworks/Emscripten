@@ -61,13 +61,18 @@ Binaryen codegen options
 Trap mode
 ---------
 
-WebAssembly can trap - throw an exception - on things like division by zero, rounding a very large float to an int, and so forth. In asm.js such things were silently ignored, as in JavaScript they do not throw, so this is a difference between JavaScript and WebAssembly that you may notice.
+WebAssembly can trap - throw an exception - on things like division by zero, rounding a very large float to an int, and so forth. In asm.js such things were silently ignored, as in JavaScript they do not throw, so this is a difference between JavaScript and WebAssembly that you may notice, with the browser reporting an error like ``float unrepresentable in integer range``, ``integer result unrepresentable``, ``integer overflow``, or ``Out of bounds Trunc operation``.
 
-By default emscripten will emit code that is optimized for speed, which means it emits compact code that may trap on the things mentioned before. To get the same behavior as JavaScript, i.e., not trap on them, you can build with ``-s "BINARYEN_TRAP_MODE='js'"``.
+By default emscripten will emit code that is optimized for size and speed, which means it emits code that may trap on the things mentioned before. That mode is called ``allow``. The other modes are ``clamp``, which will avoid traps by clamping values to a reasonable range, and ``js``, which ensures the exact same behavior as JavaScript does (which also does clamping, but makes sure to clamp exactly like JavaScript does, and also do other things JavaScript would).
 
-The other trap modes are ``'allow'`` (the default, which is to allow traps, by following WebAssembly semantics in the simplest and therefore most efficient way) and ``'clamp'`` (which will not trap, but will also not necessarily do the exact same as JavaScript does, instead it will clamp the values to something 'reasonable').
+In general, using ``clamp`` is safest, as whether such a trap occurs depends on how the LLVM optimizer optimizes code. In other words, there is no guarantee that this will not be an issue, and updating LLVM can make a problem appear or vanish (the wasm spec process has recognized this problem and intends to standardize `new operations that avoid it <https://github.com/WebAssembly/design/issues/1143>`_). Also, there is not a big downside to using ``clamp``: it is only slightly larger and slower than the default ``allow``, in most cases. To do so, build with
 
-In general, you should use the default (allow traps) unless your codebase makes doing so difficult (e.g., you have many places that may cast a large float to an int). In that case, try ``'clamp'``. This is usually almost as fast as the default, and much more efficient than ``'js'`` (which works harder to get 100% compatibility with JavaScript, which is useful mostly for debugging).
+ ::
+
+	-s "BINARYEN_TRAP_MODE='clamp'"
+
+
+However, if the default (to allow traps) works in your codebase, then it may be worth keeping it that way, for the (small) benefits. Note that ``js``, which preserves the exact same behavior as JavaScript does, adds a large amount of overhead, so unless you really need that, use ``clamp`` (``js`` is often useful for debugging, though).
 
 Compiler output
 ===============
@@ -92,6 +97,7 @@ asm.js support is considered very stable now, and you can change between it and 
 - Timing issues - wasm might run faster or slower. To some extent you can mitigate that by building with ``-s DETERMINISTIC=1``.
 - Trap mode. As mentioned above, we can generate wasm that traps or that avoids traps. Make sure the trap mode is ``"js"`` when comparing builds. The ``"js"`` trap mode is also useful in a single build, as otherwise operations like division or float-to-int may trap, and the optimizer may happen to change whether a trap occurs or not, which can be confusing (for example, enabling ``SAFE_HEAP`` may prevent some optimizations, and a trap may start to occur). Instead, in the ``"js"`` trap mode there are no traps and all operations are deterministically defined as identical to JavaScript.
 - Minor libc and runtime differences. To eliminate any possible difference due to that, use builds that support both, i.e. use the same runtime etc. for both approaches, using e.g. ``-s "BINARYEN_METHOD='native-wasm,asmjs'"`` for a build that can do both, but defaults to wasm, and ``-s "BINARYEN_METHOD='asmjs,native-wasm'"`` for what is an identical build that does asm.js first. (In fact, since the builds are identical, you can make one and edit the native-wasm,asmjs string manually in the generated JS, to switch between asm.js and wasm.) Note: Such builds disable some optimizations, as mentioned above, so it's not a good idea in general.
+- Floating-point behavior: WebAssembly uses 32-bit floats in a standard way, while asm.js by default implements floats using doubles. That can lead to differences in the precision of results. You can force 32-bit float behavior in asm.js with ``-s PRECISE_F32=1``, in which case it should be identical to wasm.
 - Browser instability: It's worth testing multiple browsers, as one might have a wasm bug that another doesn't. You can also test the Binaryen interpreter (e.g. using the ``interpret-binary`` method, as discussed above).
 
 If you find that an asm.js build has the same behavior as a wasm one, then it is currently easier to debug the asm.js build: you can edit the source easily (add debug printouts, etc.), there is debug info and source maps support, etc.

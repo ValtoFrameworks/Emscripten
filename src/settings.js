@@ -326,8 +326,8 @@ var ENVIRONMENT = ''; // By default, emscripten output will run on the web, in a
                       //    'worker' - a web worker environment.
                       //    'node'   - Node.js.
                       //    'shell'  - a JS shell like d8, js, or jsc.
-                      // There is also a 'pthread' environment, see shell.js, but it cannot be specified
-                      // manually yet TODO
+                      // (There is also a 'pthread' environment, see shell.js, but it cannot be specified
+                      // manually yet TODO)
 
 var LZ4 = 0; // Enable this to support lz4-compressed file packages. They are stored compressed in memory, and
              // decompressed on the fly, avoiding storing the entire decompressed data in memory at once.
@@ -628,6 +628,8 @@ var MODULARIZE_INSTANCE = 0; // Similar to MODULARIZE, but while that mode expor
                              // Note that the promise-like API MODULARIZE provides isn't
                              // available here (since you arean't creating the instance
                              // yourself).
+var EXPORT_ES6 = 0; // Export using an ES6 Module export rather than a UMD export.
+                    // MODULARIZE must be enabled for ES6 exports.
 
 var BENCHMARK = 0; // If 1, will just time how long main() takes to execute, and not
                    // print out anything at all whatsoever. This is useful for benchmarking.
@@ -721,6 +723,7 @@ var SAFE_SPLIT_MEMORY = 0; // Similar to SAFE_HEAP, but for SPLIT_MEMORY.
 
 var RUNNING_JS_OPTS = 0; // whether js opts will be run, after the main compiler
 var BOOTSTRAPPING_STRUCT_INFO = 0; // whether we are in the generate struct_info bootstrap phase
+var STRUCT_INFO = ''; // struct_info that is either generated or cached
 
 var EMSCRIPTEN_TRACING = 0; // Add some calls to emscripten tracing APIs
 
@@ -735,17 +738,11 @@ var WASM = 1; // Whether to use compile code to WebAssembly. Set this to 0 to co
               // of the port, which can useful for local dev work on binaryen itself).
 
 var WASM_BACKEND = 0; // Whether to use the WebAssembly backend that is in development in LLVM.
-                      // This requires that BINARYEN be set, as we use Binaryen's s2wasm to
-                      // translate the backend output.
                       // You should not set this yourself, instead set EMCC_WASM_BACKEND=1 in the
                       // environment.
-var EXPERIMENTAL_USE_LLD = 0; // Whether to use lld as a linker for the
-                              // WebAssembly backend, instead of s2wasm.
-                              // Currently an experiment, the plan is to make
-                              // this the default behavior long-term, and remove
-                              // the flag.
-                              // You should not set this yourself, instead set
-                              // EMCC_EXPERIMENTAL_USE_LLD=1 in the environment.
+
+var WASM_OBJECT_FILES = 0; // Whether to compile object files as wasm as opposed to the default
+                           // of using LLVM IR.
 
 var BINARYEN_METHOD = "native-wasm"; // How we should run WebAssembly code. By default, we run it natively.
                                      // See binaryen's src/js/wasm.js-post.js for more details and options.
@@ -769,7 +766,9 @@ var BINARYEN_PASSES = ""; // A comma-separated list of passes to run in the bina
                           // When set, this overrides the default passes we would normally run.
 var WASM_MEM_MAX = -1; // Set the maximum size of memory in the wasm module (in bytes).
                        // Without this, TOTAL_MEMORY is used (as it is used for the initial value),
-                       // or if memory growth is enabled, no limit is set. This overrides both of those.
+                       // or if memory growth is enabled, the default value here (-1) is to have
+                       // no limit, but you can set this to set a maximum size that growth will
+                       // stop at.
                        // (This option was formerly called BINARYEN_MEM_MAX)
 var BINARYEN_ASYNC_COMPILATION = 1; // Whether to compile the wasm asynchronously, which is more
                                     // efficient and does not block the main thread. This is currently
@@ -848,6 +847,9 @@ var PTHREADS_PROFILING = 0; // True when building with --threadprofiler
 var PTHREADS_DEBUG = 0; // If true, add in debug traces for diagnosing pthreads related issues.
 
 var MAX_GLOBAL_ALIGN = -1; // received from the backend
+var IMPLEMENTED_FUNCTIONS = []; // received from the backend
+var JSCALL_START_INDEX = 0; // received from the backend
+var JSCALL_SIG_ORDER = {}; // received from the backend
 
 // Duplicate function elimination. This coalesces function bodies that are
 // identical, which can happen e.g. if two methods have different C/C++
@@ -904,10 +906,22 @@ var BUNDLED_CD_DEBUG_FILE = ""; // Path to the CyberDWARF debug file passed to t
 
 var TEXTDECODER = 1; // Is enabled, use the JavaScript TextDecoder API for string marshalling.
                      // Enabled by default, set this to 0 to disable.
+var EMBIND_STD_STRING_IS_UTF8 = 1; // Embind specific: If enabled, assume UTF-8 encoded data in std::string binding.
+                                   // Disable this to support binary data transfer.
 
 var OFFSCREENCANVAS_SUPPORT = 0; // If set to 1, enables support for transferring canvases to pthreads and creating WebGL contexts in them,
                                  // as well as explicit swap control for GL contexts. This needs browser support for the OffscreenCanvas
                                  // specification.
+var OFFSCREEN_FRAMEBUFFER = 0; // If set to 1, enables support for WebGL contexts to render to an offscreen render target, to avoid
+                               // the implicit swap behavior of WebGL where exiting any event callback would automatically perform a "flip"
+                               // to present rendered content on screen. When an Emscripten GL context has Offscreen Framebuffer enabled, a single
+                               // frame can be composited from multiple event callbacks, and the swap function emscripten_webgl_commit_frame()
+                               // is then explicitly called to present the rendered content on screen.
+                               // The OffscreenCanvas feature also enables explicit GL frame swapping support, and also,
+                               // -s OFFSCREEN_FRAMEBUFFER=1 feature can be used to polyfill support for accessing WebGL in multiple
+                               // threads in the absence of OffscreenCanvas support in browser, at the cost of some performance and latency.
+                               // OffscreenCanvas and Offscreen Framebuffer support can be enabled at the same time, and allows one to
+                               // utilize OffscreenCanvas where available, and to fall back to Offscreen Framebuffer otherwise.
 
 var FETCH_DEBUG = 0; // If nonzero, prints out debugging information in library_fetch.js
 
