@@ -1,7 +1,12 @@
-//"use strict";
-
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+//
 // Various tools for parsing LLVM. Utilities of various sorts, that are
 // specific to Emscripten (and hence not in utility.js).
+
+//"use strict";
 
 // Does simple 'macro' substitution, using Django-like syntax,
 // {{{ code }}} will be replaced with |eval(code)|.
@@ -37,43 +42,9 @@ function preprocess(text, filenameHint) {
         if (line[1] == 'i') {
           if (line[2] == 'f') { // if
             var parts = line.split(' ');
-            var ident = parts[1];
-            var op = parts[2];
-            var value = parts[3];
-            if (typeof value === 'string') {
-              // when writing
-              // #if option == 'stringValue'
-              // we need to get rid of the quotes
-              if (value[0] === '"' || value[0] === "'") {
-                assert(value[value.length - 1] == '"' || value[value.length - 1] == "'");
-                value = value.substring(1, value.length - 1);
-              }
-            }
-            if (op) {
-              if (op === '==') {
-                showStack.push(ident in this && this[ident] == value);
-              } else if (op === '!=') {
-                showStack.push(!(ident in this && this[ident] == value));
-              } else if (op === '<') {
-                showStack.push(ident in this && this[ident] < value);
-              } else if (op === '>') {
-                showStack.push(ident in this && this[ident] > value);
-              } else {
-                error('unsupported preprocessor op ' + op);
-              }
-            } else {
-              // Check if a value is truthy.
-              var short = ident[0] === '!' ? ident.substr(1) : ident;
-              var truthy = short in this;
-              if (truthy) {
-                truthy = !!this[short];
-              }
-              if (ident[0] === '!') {
-                showStack.push(!truthy);
-              } else {
-                showStack.push(truthy);
-              }
-            }
+            var after = parts.slice(1).join(' ');
+            var truthy = !!eval(after);
+            showStack.push(truthy);
           } else if (line[2] == 'n') { // include
             var filename = line.substr(line.indexOf(' ')+1);
             if (filename.indexOf('"') === 0) {
@@ -1303,15 +1274,11 @@ function makeGetSlabs(ptr, type, allowMultiple, unsigned) {
 }
 
 function makeGetTempRet0() {
-  return RELOCATABLE ? "(getTempRet0() | 0)" : "tempRet0";
+  return "(getTempRet0() | 0)";
 }
 
 function makeSetTempRet0(value) {
-  if (WASM_BACKEND == 1) {
-    return 'Module["asm"]["setTempRet0"](' + value + ')';
-  } else {
-    return RELOCATABLE ? "setTempRet0((" + value + ") | 0)" : ("tempRet0 = " + value);
-  }
+  return "setTempRet0((" + value + ") | 0)";
 }
 
 function makeStructuralReturn(values, inAsm) {
@@ -1455,19 +1422,18 @@ function makeDynCall(sig) {
 }
 
 function heapAndOffset(heap, ptr) { // given   HEAP8, ptr   , we return    splitChunk, relptr
-  if (!SPLIT_MEMORY) return heap + ',' + ptr;
-  return heap + 's[(' + ptr + ') >> SPLIT_MEMORY_BITS], (' + ptr + ') & SPLIT_MEMORY_MASK'; 
+  return heap + ',' + ptr;
 }
 
 function makeEval(code) {
-  if (NO_DYNAMIC_EXECUTION == 1) {
+  if (DYNAMIC_EXECUTION == 0) {
     // Treat eval as error.
-    return "abort('NO_DYNAMIC_EXECUTION=1 was set, cannot eval');";
+    return "abort('DYNAMIC_EXECUTION=0 was set, cannot eval');";
   }
   var ret = '';
-  if (NO_DYNAMIC_EXECUTION == 2) {
+  if (DYNAMIC_EXECUTION == 2) {
     // Warn on evals, but proceed.
-    ret += "err('Warning: NO_DYNAMIC_EXECUTION=2 was set, but calling eval in the following location:');\n";
+    ret += "err('Warning: DYNAMIC_EXECUTION=2 was set, but calling eval in the following location:');\n";
     ret += "err(stackTrace());\n";
   }
   ret += code;

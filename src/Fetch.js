@@ -1,3 +1,8 @@
+// Copyright 2016 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 var Fetch = {
   attr_t_offset_requestMethod: 0,
   attr_t_offset_userData: 32,
@@ -108,8 +113,8 @@ var Fetch = {
       addRunDependency('library_fetch_init');
 
       var fetchJs = 'fetch-worker.js';
-      // Allow HTML module to configure the location where the 'pthread-main.js' file will be loaded from,
-      // via Module.locateFile() function. If not specified, then the default URL 'pthread-main.js' relative
+      // Allow HTML module to configure the location where the 'worker.js' file will be loaded from,
+      // via Module.locateFile() function. If not specified, then the default URL 'worker.js' relative
       // to the main html file is loaded.
       fetchJs = locateFile(fetchJs);
       Fetch.worker = new Worker(fetchJs);
@@ -395,7 +400,7 @@ function __emscripten_fetch_xhr(fetch, onsuccess, onerror, onprogress) {
     }
     HEAPU16[fetch + Fetch.fetch_t_offset_status >> 1] = xhr.status;
     if (xhr.statusText) stringToUTF8(xhr.statusText, fetch + Fetch.fetch_t_offset_statusText, 64);
-    if (xhr.status == 200) {
+    if (xhr.status >= 200 && xhr.status < 300) {
 #if FETCH_DEBUG
       console.log('fetch: xhr of URL "' + xhr.url_ + '" / responseURL "' + xhr.responseURL + '" succeeded with status 200');
 #endif
